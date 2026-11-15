@@ -1,0 +1,161 @@
+{
+  "entities": {
+    "UserPublic": {
+      "title": "UserPublic",
+      "description": "Profil public et préférences d'un utilisateur autorisé (sans données PII).",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["admin", "user"] },
+        "active": { "type": "boolean" },
+        "defaultPrepose": { "type": "string", "maxLength": 150 },
+        "defaultHoraireDebut": { "type": "string", "maxLength": 20 },
+        "defaultHoraireFin": { "type": "string", "maxLength": 20 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "role",
+        "active",
+        "defaultPrepose",
+        "defaultHoraireDebut",
+        "defaultHoraireFin",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserPrivate": {
+      "title": "UserPrivate",
+      "description": "Informations personnelles isolées de l'utilisateur (email).",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "minLength": 3, "maxLength": 200 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "updatedAt"]
+    },
+    "Chantier": {
+      "title": "Chantier",
+      "description": "Fiche de chantier INASEP synchronisée multi-appareils.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "ownerName": { "type": "string", "maxLength": 120 },
+        "visibility": { "type": "string", "enum": ["team", "private"] },
+        "memberIds": { "type": "array" },
+        "numero": { "type": "string", "maxLength": 100 },
+        "projet": { "type": "string", "maxLength": 250 },
+        "entrepriseNom": { "type": "string", "maxLength": 200 },
+        "entrepriseAdresse": { "type": "string", "maxLength": 500 },
+        "references": { "type": "string", "maxLength": 150 },
+        "adresseChantier": { "type": "string", "maxLength": 500 },
+        "horaireDebut": { "type": "string", "maxLength": 20 },
+        "horaireFin": { "type": "string", "maxLength": 20 },
+        "preposeSurveillance": { "type": "string", "maxLength": 150 },
+        "postes": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "ownerName",
+        "visibility",
+        "memberIds",
+        "numero",
+        "projet",
+        "entrepriseNom",
+        "entrepriseAdresse",
+        "references",
+        "adresseChantier",
+        "horaireDebut",
+        "horaireFin",
+        "preposeSurveillance",
+        "postes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Journal": {
+      "title": "Journal",
+      "description": "Journal quotidien des travaux rattaché à un chantier.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "chantierId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "chantierOwnerId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "chantierVisibility": { "type": "string", "enum": ["team", "private"] },
+        "chantierMemberIds": { "type": "array" },
+        "authorId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "authorName": { "type": "string", "maxLength": 120 },
+        "journalNum": { "type": "number" },
+        "date": { "type": "string", "maxLength": 20 },
+        "horaireDebut": { "type": "string", "maxLength": 20 },
+        "horaireFin": { "type": "string", "maxLength": 20 },
+        "tempMatin": { "type": "string", "maxLength": 20 },
+        "tempApresMidi": { "type": "string", "maxLength": 20 },
+        "etatAtmo": { "type": "array" },
+        "ouvriers": { "type": "array" },
+        "travaux": { "type": "array" },
+        "materiel": { "type": "array" },
+        "materiaux": { "type": "array" },
+        "essais": { "type": "array" },
+        "evenements": { "type": "array" },
+        "decisions": { "type": "array" },
+        "visites": { "type": "array" },
+        "sigEntrepreneur": { "type": "string", "maxLength": 150 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "chantierId",
+        "chantierOwnerId",
+        "chantierVisibility",
+        "chantierMemberIds",
+        "authorId",
+        "authorName",
+        "journalNum",
+        "date",
+        "horaireDebut",
+        "horaireFin",
+        "tempMatin",
+        "tempApresMidi",
+        "etatAtmo",
+        "ouvriers",
+        "travaux",
+        "materiel",
+        "materiaux",
+        "essais",
+        "evenements",
+        "decisions",
+        "visites",
+        "sigEntrepreneur",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserPublic" },
+      "description": "Profil public de l'utilisateur (nom, rôle, horodatage)."
+    },
+    "/users/{userId}/private/info": {
+      "schema": { "$ref": "#/entities/UserPrivate" },
+      "description": "Données privées PII de l'utilisateur (adresse email)."
+    },
+    "/chantiers/{chantierId}": {
+      "schema": { "$ref": "#/entities/Chantier" },
+      "description": "Liste des chantiers synchronisés entre appareils et utilisateurs."
+    },
+    "/chantiers/{chantierId}/journaux/{journalId}": {
+      "schema": { "$ref": "#/entities/Journal" },
+      "description": "Journaux quotidiens d'un chantier."
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Journal des travaux — INASEP",
+  "description": "Application de suivi quotidien et hebdomadaire de chantier avec export PDF A4, import Excel (.xlsx), aperçu en direct et archivage OneDrive.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,327 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default-Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isVerified()
+        && (request.auth.token.email == 'fabien.pirquin@inasep.be'
+          || request.auth.token.email == 'pirquinfabien@gmail.com');
+    }
+
+    function isOwner(userId) {
+      return isVerified() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isStringBounded(val, maxLen) {
+      return val is string && val.size() <= maxLen;
+    }
+
+    function isStringListBounded(val, maxItems) {
+      return val is list && val.size() <= maxItems && (val.size() == 0 || val[0] is string);
+    }
+
+    function isValidUserPublic(data) {
+      return data.keys().hasAll([
+        'uid', 'displayName', 'role', 'active',
+        'defaultPrepose', 'defaultHoraireDebut', 'defaultHoraireFin',
+        'createdAt', 'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'uid', 'displayName', 'role', 'active',
+        'defaultPrepose', 'defaultHoraireDebut', 'defaultHoraireFin',
+        'createdAt', 'updatedAt'
+      ])
+      && isValidId(data.uid)
+      && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+      && data.role in ['admin', 'user']
+      && data.active is bool
+      && isStringBounded(data.defaultPrepose, 150)
+      && isStringBounded(data.defaultHoraireDebut, 20)
+      && isStringBounded(data.defaultHoraireFin, 20)
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivate(data) {
+      return data.keys().hasAll(['email', 'updatedAt'])
+        && data.keys().hasOnly(['email', 'updatedAt'])
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidChantier(data) {
+      return data.keys().hasAll([
+        'id', 'ownerId', 'ownerName', 'visibility', 'memberIds',
+        'numero', 'projet', 'entrepriseNom', 'entrepriseAdresse',
+        'references', 'adresseChantier', 'horaireDebut', 'horaireFin',
+        'preposeSurveillance', 'postes', 'createdAt', 'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'id', 'ownerId', 'ownerName', 'visibility', 'memberIds',
+        'numero', 'projet', 'entrepriseNom', 'entrepriseAdresse',
+        'references', 'adresseChantier', 'horaireDebut', 'horaireFin',
+        'preposeSurveillance', 'postes', 'createdAt', 'updatedAt'
+      ])
+      && isValidId(data.id)
+      && isValidId(data.ownerId)
+      && isStringBounded(data.ownerName, 120)
+      && data.visibility in ['team', 'private']
+      && isStringListBounded(data.memberIds, 50)
+      && isStringBounded(data.numero, 100)
+      && isStringBounded(data.projet, 250)
+      && isStringBounded(data.entrepriseNom, 200)
+      && isStringBounded(data.entrepriseAdresse, 500)
+      && isStringBounded(data.references, 150)
+      && isStringBounded(data.adresseChantier, 500)
+      && isStringBounded(data.horaireDebut, 20)
+      && isStringBounded(data.horaireFin, 20)
+      && isStringBounded(data.preposeSurveillance, 150)
+      && isStringListBounded(data.postes, 2000)
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidJournal(data) {
+      return data.keys().hasAll([
+        'id', 'chantierId', 'chantierOwnerId', 'chantierVisibility',
+        'chantierMemberIds', 'authorId', 'authorName', 'journalNum',
+        'date', 'horaireDebut', 'horaireFin', 'tempMatin', 'tempApresMidi',
+        'etatAtmo', 'ouvriers', 'travaux', 'materiel', 'materiaux',
+        'essais', 'evenements', 'decisions', 'visites', 'sigEntrepreneur',
+        'createdAt', 'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'id', 'chantierId', 'chantierOwnerId', 'chantierVisibility',
+        'chantierMemberIds', 'authorId', 'authorName', 'journalNum',
+        'date', 'horaireDebut', 'horaireFin', 'tempMatin', 'tempApresMidi',
+        'etatAtmo', 'ouvriers', 'travaux', 'materiel', 'materiaux',
+        'essais', 'evenements', 'decisions', 'visites', 'sigEntrepreneur',
+        'createdAt', 'updatedAt'
+      ])
+      && isValidId(data.id)
+      && isValidId(data.chantierId)
+      && isValidId(data.chantierOwnerId)
+      && data.chantierVisibility in ['team', 'private']
+      && isStringListBounded(data.chantierMemberIds, 50)
+      && isValidId(data.authorId)
+      && isStringBounded(data.authorName, 120)
+      && data.journalNum is number && data.journalNum >= 1 && data.journalNum <= 99999
+      && isStringBounded(data.date, 20)
+      && isStringBounded(data.horaireDebut, 20)
+      && isStringBounded(data.horaireFin, 20)
+      && isStringBounded(data.tempMatin, 20)
+      && isStringBounded(data.tempApresMidi, 20)
+      && isStringListBounded(data.etatAtmo, 20)
+      && data.ouvriers is list && data.ouvriers.size() <= 100 && (data.ouvriers.size() == 0 || data.ouvriers[0] is map)
+      && isStringListBounded(data.travaux, 200)
+      && isStringListBounded(data.materiel, 200)
+      && isStringListBounded(data.materiaux, 200)
+      && isStringListBounded(data.essais, 200)
+      && isStringListBounded(data.evenements, 200)
+      && isStringListBounded(data.decisions, 200)
+      && isStringListBounded(data.visites, 200)
+      && isStringBounded(data.sigEntrepreneur, 150)
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isChantierMember(data) {
+      return data.visibility == 'team'
+        || data.ownerId == request.auth.uid
+        || request.auth.uid in data.memberIds;
+    }
+
+    match /users/{userId} {
+      allow get: if isVerified() && isValidId(userId) && (isAdmin() || userId == request.auth.uid);
+      allow list: if isVerified() && (isAdmin() || resource.data.uid == request.auth.uid);
+
+      allow create: if isVerified()
+        && isValidId(userId)
+        && isValidUserPublic(incoming())
+        && incoming().uid == userId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (userId == request.auth.uid && incoming().role == 'user' && incoming().active == true)
+        );
+
+      allow update: if isVerified()
+        && isValidId(userId)
+        && isValidUserPublic(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly([
+            'displayName', 'role', 'active', 'defaultPrepose', 'defaultHoraireDebut', 'defaultHoraireFin', 'updatedAt'
+          ]))
+          || (isOwner(userId)
+              && incoming().role == existing().role
+              && incoming().active == existing().active
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'displayName', 'defaultPrepose', 'defaultHoraireDebut', 'defaultHoraireFin', 'updatedAt'
+              ]))
+        );
+
+      allow delete: if isAdmin() && isValidId(userId) && userId != request.auth.uid;
+
+      match /private/{docId} {
+        allow get: if isValidId(userId) && docId == 'info' && (isOwner(userId) || isAdmin());
+        allow list: if isAdmin() || (isVerified() && userId == request.auth.uid);
+
+        allow create: if isValidId(userId)
+          && docId == 'info'
+          && (isOwner(userId) || isAdmin())
+          && isValidUserPrivate(incoming())
+          && incoming().updatedAt == request.time;
+
+        allow update: if isValidId(userId)
+          && docId == 'info'
+          && (isOwner(userId) || isAdmin())
+          && isValidUserPrivate(incoming())
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'updatedAt']);
+
+        allow delete: if isAdmin() && isValidId(userId) && docId == 'info';
+      }
+    }
+
+    match /chantiers/{chantierId} {
+      allow get: if isVerified()
+        && isValidId(chantierId)
+        && (isAdmin() || isChantierMember(existing()));
+
+      allow list: if isVerified()
+        && (isAdmin()
+          || resource.data.visibility == 'team'
+          || resource.data.ownerId == request.auth.uid
+          || request.auth.uid in resource.data.memberIds);
+
+      allow create: if isVerified()
+        && isValidId(chantierId)
+        && isValidChantier(incoming())
+        && incoming().id == chantierId
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerified()
+        && isValidId(chantierId)
+        && isValidChantier(incoming())
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (existing().ownerId == request.auth.uid
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'visibility', 'memberIds', 'numero', 'projet', 'entrepriseNom',
+                'entrepriseAdresse', 'references', 'adresseChantier',
+                'horaireDebut', 'horaireFin', 'preposeSurveillance', 'postes', 'updatedAt'
+              ]))
+          || (isChantierMember(existing())
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'numero', 'projet', 'entrepriseNom', 'entrepriseAdresse',
+                'references', 'adresseChantier', 'horaireDebut', 'horaireFin',
+                'preposeSurveillance', 'postes', 'updatedAt'
+              ]))
+        );
+
+      allow delete: if isVerified()
+        && isValidId(chantierId)
+        && (isAdmin() || existing().ownerId == request.auth.uid);
+
+      match /journaux/{journalId} {
+        allow get: if isVerified()
+          && isValidId(chantierId)
+          && isValidId(journalId)
+          && (isAdmin() || isChantierMember(get(/databases/$(database)/documents/chantiers/$(chantierId)).data));
+
+        allow list: if isVerified()
+          && (isAdmin()
+            || resource.data.chantierVisibility == 'team'
+            || resource.data.chantierOwnerId == request.auth.uid
+            || request.auth.uid in resource.data.chantierMemberIds);
+
+        allow create: if isVerified()
+          && isValidId(chantierId)
+          && isValidId(journalId)
+          && isValidJournal(incoming())
+          && incoming().id == journalId
+          && incoming().chantierId == chantierId
+          && incoming().authorId == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/chantiers/$(chantierId))
+          && (isAdmin() || isChantierMember(get(/databases/$(database)/documents/chantiers/$(chantierId)).data))
+          && incoming().chantierOwnerId == get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId
+          && incoming().chantierVisibility == get(/databases/$(database)/documents/chantiers/$(chantierId)).data.visibility
+          && incoming().chantierMemberIds == get(/databases/$(database)/documents/chantiers/$(chantierId)).data.memberIds;
+
+        allow update: if isVerified()
+          && isValidId(chantierId)
+          && isValidId(journalId)
+          && isValidJournal(incoming())
+          && incoming().id == existing().id
+          && incoming().chantierId == existing().chantierId
+          && incoming().chantierOwnerId == existing().chantierOwnerId
+          && incoming().authorId == existing().authorId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            isAdmin()
+            || (get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'journalNum', 'date', 'horaireDebut', 'horaireFin',
+                  'tempMatin', 'tempApresMidi', 'etatAtmo', 'ouvriers',
+                  'travaux', 'materiel', 'materiaux', 'essais', 'evenements',
+                  'decisions', 'visites', 'sigEntrepreneur',
+                  'chantierVisibility', 'chantierMemberIds', 'updatedAt'
+                ]))
+            || (isChantierMember(get(/databases/$(database)/documents/chantiers/$(chantierId)).data)
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'journalNum', 'date', 'horaireDebut', 'horaireFin',
+                  'tempMatin', 'tempApresMidi', 'etatAtmo', 'ouvriers',
+                  'travaux', 'materiel', 'materiaux', 'essais', 'evenements',
+                  'decisions', 'visites', 'sigEntrepreneur', 'updatedAt'
+                ]))
+          );
+
+        allow delete: if isVerified()
+          && isValidId(chantierId)
+          && isValidId(journalId)
+          && (isAdmin()
+            || existing().authorId == request.auth.uid
+            || get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid);
+      }
+    }
+  }
+}
