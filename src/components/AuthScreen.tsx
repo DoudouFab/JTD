@@ -25,7 +25,7 @@ import { APP_SIGNATURE, DEFAULT_ADMIN_EMAIL, INASEP_LOGO_DATA_URL } from '../typ
 
 interface AuthScreenProps {
   unverifiedUser: User | null;
-  onVerifiedRefresh: () => Promise<void>;
+  onVerifiedRefresh: () => Promise<boolean>;
 }
 
 function mapAuthError(err: unknown): {
@@ -48,14 +48,31 @@ function mapAuthError(err: unknown): {
       return { message: 'Un compte existe déjà avec cette adresse e-mail.' };
     case 'auth/weak-password':
       return {
-        message: 'Le mot de passe doit contenir au moins 6 caractères (exigence Firebase).',
+        message:
+          'Le mot de passe doit contenir au moins 6 caractères (exigence Firebase).',
       };
     case 'auth/invalid-email':
       return { message: 'Adresse e-mail invalide.' };
     case 'auth/too-many-requests':
       return {
         message:
-          'Trop de tentatives. Patientez quelques instants avant de réessayer.',
+          "Un e-mail vient déjà d'être envoyé ou trop de tentatives ont été effectuées. Patientez 1 minute et vérifiez vos spams avant de réessayer.",
+      };
+    case 'auth/network-request-failed':
+      return {
+        message:
+          'Connexion réseau impossible. Vérifiez votre accès Internet et réessayez.',
+      };
+    case 'auth/unauthorized-domain':
+      return {
+        message:
+          "Ce domaine n'est pas encore autorisé dans Firebase (Authentication → Paramètres → Domaines autorisés).",
+      };
+    case 'auth/user-token-expired':
+    case 'auth/requires-recent-login':
+      return {
+        message:
+          'Votre session a expiré. Cliquez sur « Changer de compte » puis reconnectez-vous.',
       };
     case 'auth/popup-closed-by-user':
       return { message: 'Connexion Google annulée.' };
@@ -174,13 +191,34 @@ export function AuthScreen({
   };
 
   const handleResendVerification = async () => {
-    if (!unverifiedUser) return;
+    const targetUser = auth.currentUser || unverifiedUser;
+    if (!targetUser) return;
     setBusy(true);
     setErrorMsg(null);
     setInfoMsg(null);
     try {
-      await sendEmailVerification(unverifiedUser);
-      setInfoMsg('E-mail de vérification renvoyé. Vérifiez votre boîte de réception.');
+      await sendEmailVerification(targetUser);
+      setInfoMsg(
+        'E-mail de vérification renvoyé. Vérifiez votre boîte de réception et vos courriers indésirables.'
+      );
+    } catch (err) {
+      setErrorMsg(mapAuthError(err).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCheckVerified = async () => {
+    setBusy(true);
+    setErrorMsg(null);
+    setInfoMsg(null);
+    try {
+      const verified = await onVerifiedRefresh();
+      if (!verified) {
+        setErrorMsg(
+          "Votre adresse e-mail n'est pas encore confirmée. Cliquez sur le lien reçu par e-mail (vérifiez aussi les spams), puis réessayez."
+        );
+      }
     } catch (err) {
       setErrorMsg(mapAuthError(err).message);
     } finally {
@@ -247,10 +285,7 @@ export function AuthScreen({
                 <button
                   type="button"
                   disabled={busy}
-                  onClick={() => {
-                    setBusy(true);
-                    onVerifiedRefresh().finally(() => setBusy(false));
-                  }}
+                  onClick={handleCheckVerified}
                   className="w-full min-h-[46px] rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-sm flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
                 >
                   <RefreshCw className="w-4 h-4" />

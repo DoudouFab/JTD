@@ -6,6 +6,8 @@ import {
   type User,
 } from 'firebase/auth';
 import {
+  arrayRemove,
+  arrayUnion,
   collection,
   deleteDoc,
   doc,
@@ -15,6 +17,7 @@ import {
   query,
   serverTimestamp,
   setDoc,
+  Timestamp,
   updateDoc,
   where,
   writeBatch,
@@ -28,7 +31,16 @@ import {
   isAdminEmail,
   OperationType,
 } from '../firebase';
-import type { Chantier, DB, Journal, UserProfile } from '../types';
+import type {
+  Chantier,
+  ChantierShare,
+  DB,
+  Journal,
+  JournalStatus,
+  PageSignatureRecord,
+  ShareInvite,
+  UserProfile,
+} from '../types';
 import { uid } from './storage';
 
 export function sanitizeDocId(raw?: string): string {
@@ -42,11 +54,13 @@ function clampStr(val: unknown, max: number): string {
   return String(val ?? '').slice(0, max);
 }
 
-function clampStrList(val: unknown, maxItems: number, maxItemLen = 500): string[] {
+function clampStrList(
+  val: unknown,
+  maxItems: number,
+  maxItemLen = 500
+): string[] {
   if (!Array.isArray(val)) return [];
-  return val
-    .slice(0, maxItems)
-    .map((item) => clampStr(item, maxItemLen));
+  return val.slice(0, maxItems).map((item) => clampStr(item, maxItemLen));
 }
 
 function sanitizeChantierPayload(
@@ -56,9 +70,7 @@ function sanitizeChantierPayload(
   isCreate: boolean,
   existingCreatedAt?: unknown
 ) {
-  const visibility: 'team' | 'private' =
-    ch.visibility === 'private' ? 'private' : 'team';
-  const memberIds = clampStrList(ch.memberIds || [], 50, 128).filter((id) =>
+  const readerIds = clampStrList(ch.readerIds || [], 25, 128).filter((id) =>
     /^[a-zA-Z0-9_-]+$/.test(id)
   );
 
@@ -66,8 +78,13 @@ function sanitizeChantierPayload(
     id: sanitizeDocId(ch.id),
     ownerId,
     ownerName: clampStr(ownerName, 120),
-    visibility,
-    memberIds,
+    visibility: 'private' as const,
+    readerIds,
+    journalIds: clampStrList(
+      (ch as Chantier & { journalIds?: string[] }).journalIds || [],
+      1000,
+      128
+    ),
     numero: clampStr(ch.numero, 100),
     projet: clampStr(ch.projet, 250),
     entrepriseNom: clampStr(ch.entrepriseNom, 200),
@@ -78,7 +95,9 @@ function sanitizeChantierPayload(
     horaireFin: clampStr(ch.horaireFin || '16:30', 20),
     preposeSurveillance: clampStr(ch.preposeSurveillance, 150),
     postes: clampStrList(ch.postes, 2000, 350),
-    createdAt: isCreate ? serverTimestamp() : existingCreatedAt || serverTimestamp(),
+    createdAt: isCreate
+      ? serverTimestamp()
+      : existingCreatedAt || serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
 }
@@ -99,20 +118,23 @@ function sanitizeJournalPayload(
       nbre: Math.max(0, Math.min(9999, Number(o?.nbre) || 0)),
     }));
 
-  const chantierVisibility: 'team' | 'private' =
-    chantier.visibility === 'private' ? 'private' : 'team';
-  const chantierMemberIds = clampStrList(chantier.memberIds || [], 50, 128).filter(
-    (id) => /^[a-zA-Z0-9_-]+$/.test(id)
-  );
+  const chantierReaderIds = clampStrList(
+    chantier.readerIds || [],
+    25,
+    128
+  ).filter((id) => /^[a-zA-Z0-9_-]+$/.test(id));
+
+  const status: JournalStatus =
+    j.status === 'completed' ? 'completed' : 'in_progress';
 
   return {
     id: sanitizeDocId(j.id),
     chantierId: sanitizeDocId(chantier.id),
     chantierOwnerId: chantier.ownerId || authorId,
-    chantierVisibility,
-    chantierMemberIds,
+    chantierReaderIds,
     authorId,
     authorName: clampStr(authorName, 120),
+    status,
     journalNum: Math.max(1, Math.min(99999, Number(j.journalNum) || 1)),
     date: clampStr(j.date, 20),
     horaireDebut: clampStr(j.horaireDebut, 20),
@@ -129,7 +151,11 @@ function sanitizeJournalPayload(
     decisions: clampStrList(j.decisions, 200, 500),
     visites: clampStrList(j.visites, 200, 400),
     sigEntrepreneur: clampStr(j.sigEntrepreneur, 150),
-    createdAt: isCreate ? serverTimestamp() : existingCreatedAt || serverTimestamp(),
+    signatureControleur: j.signatureControleur ?? null,
+    signatureLecteur: j.signatureLecteur ?? null,
+    createdAt: isCreate
+      ? serverTimestamp()
+      : existingCreatedAt || serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
 }
@@ -137,13 +163,13 @@ function sanitizeJournalPayload(
 export async function ensureUserProfile(user: User): Promise<UserProfile> {
   const userRef = doc(db, 'users', user.uid);
   const privRef = doc(db, 'users', user.uid, 'private', 'info');
-  const isDefaultAdmin = isAdminEmail(user.email);
+  const isSoleAdmin = isAdminEmail(user.email);
   const defaultName =
     user.displayName?.trim() ||
-    (isDefaultAdmin ? 'Fabien Pirquin' : user.email?.split('@')[0]) ||
+    (isSoleAdmin ? 'Fabien Pirquin' : user.email?.split('@')[0]) ||
     'Utilisateur INASEP';
-  const expectedRole: 'admin' | 'user' = isDefaultAdmin ? 'admin' : 'user';
-  const defaultPreposeInit = isDefaultAdmin ? 'F. Pirquin' : '';
+  const expectedRole: 'admin' | 'user' = isSoleAdmin ? 'admin' : 'user';
+  const defaultPreposeInit = isSoleAdmin ? 'F. Pirquin' : '';
 
   try {
     const snap = await getDoc(userRef);
@@ -152,7 +178,7 @@ export async function ensureUserProfile(user: User): Promise<UserProfile> {
       displayName: defaultName,
       email: user.email || undefined,
       role: expectedRole,
-      active: true,
+      active: isSoleAdmin, // Self-registered users wait for Admin approval
       defaultPrepose: defaultPreposeInit,
       defaultHoraireDebut: '07:30',
       defaultHoraireFin: '16:30',
@@ -163,7 +189,7 @@ export async function ensureUserProfile(user: User): Promise<UserProfile> {
         uid: user.uid,
         displayName: clampStr(defaultName, 120),
         role: expectedRole,
-        active: true,
+        active: isSoleAdmin,
         defaultPrepose: clampStr(defaultPreposeInit, 150),
         defaultHoraireDebut: '07:30',
         defaultHoraireFin: '16:30',
@@ -172,29 +198,16 @@ export async function ensureUserProfile(user: User): Promise<UserProfile> {
       });
     } else {
       const data = snap.data();
-      // Backfill legacy user docs that didn't have preferences fields yet
-      const needsBackfill =
-        typeof data.active !== 'boolean' ||
-        data.defaultPrepose === undefined ||
-        data.defaultHoraireDebut === undefined ||
-        data.defaultHoraireFin === undefined;
-
-      if (needsBackfill) {
-        await updateDoc(userRef, {
-          active: typeof data.active === 'boolean' ? data.active : true,
-          defaultPrepose: clampStr(data.defaultPrepose ?? defaultPreposeInit, 150),
-          defaultHoraireDebut: clampStr(data.defaultHoraireDebut ?? '07:30', 20),
-          defaultHoraireFin: clampStr(data.defaultHoraireFin ?? '16:30', 20),
-          updatedAt: serverTimestamp(),
-        });
-      }
-
       profile = {
         uid: user.uid,
         displayName: String(data.displayName || defaultName),
         email: user.email || undefined,
-        role: data.role === 'admin' || isDefaultAdmin ? 'admin' : 'user',
-        active: typeof data.active === 'boolean' ? data.active : true,
+        role: isSoleAdmin ? 'admin' : 'user',
+        active: isSoleAdmin
+          ? true
+          : typeof data.active === 'boolean'
+            ? data.active
+            : false,
         defaultPrepose: String(data.defaultPrepose ?? defaultPreposeInit),
         defaultHoraireDebut: String(data.defaultHoraireDebut ?? '07:30'),
         defaultHoraireFin: String(data.defaultHoraireFin ?? '16:30'),
@@ -254,7 +267,6 @@ export async function createUserAccountAdmin(params: {
   displayName: string;
   email: string;
   password: string;
-  role: 'admin' | 'user';
   defaultPrepose?: string;
 }): Promise<UserProfile> {
   const secondaryAuth = getSecondaryAuth();
@@ -275,12 +287,12 @@ export async function createUserAccountAdmin(params: {
   const newUid = cred.user.uid;
   await firebaseSignOut(secondaryAuth);
 
-  // Admin writes the user profile using primary Admin Firestore session
+  // Admin writes the pre-approved user profile using primary Admin Firestore session
   try {
     await setDoc(doc(db, 'users', newUid), {
       uid: newUid,
       displayName: clampStr(cleanName, 120),
-      role: params.role,
+      role: 'user',
       active: true,
       defaultPrepose: clampStr(params.defaultPrepose || cleanName, 150),
       defaultHoraireDebut: '07:30',
@@ -300,7 +312,7 @@ export async function createUserAccountAdmin(params: {
     uid: newUid,
     displayName: cleanName,
     email: cleanEmail,
-    role: params.role,
+    role: 'user',
     active: true,
     defaultPrepose: params.defaultPrepose || cleanName,
     defaultHoraireDebut: '07:30',
@@ -310,11 +322,11 @@ export async function createUserAccountAdmin(params: {
 
 export async function updateUserAdmin(
   userId: string,
-  patch: { role?: 'admin' | 'user'; active?: boolean }
+  patch: { active: boolean }
 ): Promise<void> {
   try {
     await updateDoc(doc(db, 'users', userId), {
-      ...patch,
+      active: patch.active,
       updatedAt: serverTimestamp(),
     });
   } catch (error) {
@@ -333,127 +345,149 @@ export async function deleteUserProfileAdmin(userId: string): Promise<void> {
 
 export function subscribeChantiers(
   userId: string,
-  isAdmin: boolean,
-  onData: (chantiers: Chantier[]) => void,
+  onData: (payload: {
+    chantiers: Chantier[];
+    shareByChantierId: Record<string, ChantierShare>;
+  }) => void,
   onError?: (err: Error) => void
 ): Unsubscribe {
-  const col = collection(db, 'chantiers');
-
-  if (isAdmin) {
-    return onSnapshot(
-      col,
-      (snap) => {
-        const list = snap.docs.map((d) => d.data() as Chantier);
-        list.sort((a, b) =>
-          (a.numero || a.projet || '').localeCompare(b.numero || b.projet || '')
-        );
-        onData(list);
-      },
-      (error) => {
-        try {
-          handleFirestoreError(error, OperationType.LIST, 'chantiers');
-        } catch (wrapped) {
-          onError?.(wrapped as Error);
-        }
-      }
-    );
-  }
-
-  // Regular verified users: 3 filtered queries merged cleanly (zero get() in rules!)
-  const buckets: Record<string, Map<string, Chantier>> = {
-    team: new Map(),
-    owned: new Map(),
-    member: new Map(),
-  };
+  const ownedMap = new Map<string, Chantier>();
+  const sharedMap = new Map<string, Chantier>();
+  const shareByChantierId = new Map<string, ChantierShare>();
+  const sharedDocUnsubs = new Map<string, Unsubscribe>();
 
   const emit = () => {
     const merged = new Map<string, Chantier>();
-    buckets.team.forEach((v, k) => merged.set(k, v));
-    buckets.owned.forEach((v, k) => merged.set(k, v));
-    buckets.member.forEach((v, k) => merged.set(k, v));
+    ownedMap.forEach((v, k) => merged.set(k, v));
+    sharedMap.forEach((v, k) => {
+      if (!merged.has(k)) merged.set(k, v);
+    });
     const list = Array.from(merged.values()).sort((a, b) =>
       (a.numero || a.projet || '').localeCompare(b.numero || b.projet || '')
     );
-    onData(list);
+    const shareObj: Record<string, ChantierShare> = {};
+    shareByChantierId.forEach((v, k) => {
+      shareObj[k] = v;
+    });
+    onData({ chantiers: list, shareByChantierId: shareObj });
   };
 
-  const unsubs = [
-    onSnapshot(
-      query(col, where('visibility', '==', 'team')),
-      (snap) => {
-        buckets.team.clear();
-        snap.docs.forEach((d) => buckets.team.set(d.id, d.data() as Chantier));
-        emit();
-      },
-      (error) => {
-        try {
-          handleFirestoreError(error, OperationType.LIST, 'chantiers(team)');
-        } catch (wrapped) {
-          onError?.(wrapped as Error);
-        }
+  // 1. User's strictly private owned chantiers
+  const unsubOwned = onSnapshot(
+    query(collection(db, 'chantiers'), where('ownerId', '==', userId)),
+    (snap) => {
+      ownedMap.clear();
+      snap.docs.forEach((d) => ownedMap.set(d.id, d.data() as Chantier));
+      emit();
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, 'chantiers(owned)');
+      } catch (wrapped) {
+        onError?.(wrapped as Error);
       }
-    ),
-    onSnapshot(
-      query(col, where('ownerId', '==', userId)),
-      (snap) => {
-        buckets.owned.clear();
-        snap.docs.forEach((d) => buckets.owned.set(d.id, d.data() as Chantier));
-        emit();
-      },
-      (error) => {
-        try {
-          handleFirestoreError(error, OperationType.LIST, 'chantiers(owned)');
-        } catch (wrapped) {
-          onError?.(wrapped as Error);
-        }
-      }
-    ),
-    onSnapshot(
-      query(col, where('memberIds', 'array-contains', userId)),
-      (snap) => {
-        buckets.member.clear();
-        snap.docs.forEach((d) =>
-          buckets.member.set(d.id, d.data() as Chantier)
-        );
-        emit();
-      },
-      (error) => {
-        try {
-          handleFirestoreError(error, OperationType.LIST, 'chantiers(member)');
-        } catch (wrapped) {
-          onError?.(wrapped as Error);
-        }
-      }
-    ),
-  ];
+    }
+  );
 
-  return () => unsubs.forEach((u) => u());
+  // 2. Temporary read-access shares granted to this user
+  const unsubShares = onSnapshot(
+    query(collection(db, 'chantierShares'), where('readerUid', '==', userId)),
+    (snap) => {
+      const now = Date.now();
+      const activeIds = new Set<string>();
+      shareByChantierId.clear();
+
+      snap.docs.forEach((d) => {
+        const raw = d.data();
+        const expiresAtMs = raw.expiresAt?.toMillis?.() ?? 0;
+        if (raw.revoked === false && expiresAtMs > now) {
+          const share: ChantierShare = {
+            id: String(raw.id || d.id),
+            chantierId: String(raw.chantierId),
+            chantierOwnerId: String(raw.chantierOwnerId),
+            inviteCode: String(raw.inviteCode),
+            readerUid: String(raw.readerUid),
+            readerName: String(raw.readerName || ''),
+            label: String(raw.label || ''),
+            revoked: false,
+            expiresAtMs,
+          };
+          activeIds.add(share.chantierId);
+          shareByChantierId.set(share.chantierId, share);
+
+          if (!sharedDocUnsubs.has(share.chantierId)) {
+            const unsubCh = onSnapshot(
+              doc(db, 'chantiers', share.chantierId),
+              (chSnap) => {
+                if (chSnap.exists()) {
+                  sharedMap.set(share.chantierId, chSnap.data() as Chantier);
+                } else {
+                  sharedMap.delete(share.chantierId);
+                }
+                emit();
+              },
+              () => {
+                sharedMap.delete(share.chantierId);
+                emit();
+              }
+            );
+            sharedDocUnsubs.set(share.chantierId, unsubCh);
+          }
+        }
+      });
+
+      // Clean up expired or revoked listeners
+      Array.from(sharedDocUnsubs.keys()).forEach((cId) => {
+        if (!activeIds.has(cId)) {
+          sharedDocUnsubs.get(cId)?.();
+          sharedDocUnsubs.delete(cId);
+          sharedMap.delete(cId);
+        }
+      });
+
+      emit();
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, 'chantierShares(reader)');
+      } catch (wrapped) {
+        onError?.(wrapped as Error);
+      }
+    }
+  );
+
+  return () => {
+    unsubOwned();
+    unsubShares();
+    sharedDocUnsubs.forEach((u) => u());
+    sharedDocUnsubs.clear();
+  };
 }
 
 export function subscribeChantierJournaux(
   chantier: Chantier,
   userId: string,
-  isAdmin: boolean,
   onData: (journals: Journal[]) => void,
   onError?: (err: Error) => void
 ): Unsubscribe {
   const col = collection(db, 'chantiers', chantier.id, 'journaux');
-  let q = query(col);
-
-  if (!isAdmin) {
-    if (chantier.ownerId === userId) {
-      q = query(col, where('chantierOwnerId', '==', userId));
-    } else if ((chantier.visibility || 'team') === 'team') {
-      q = query(col, where('chantierVisibility', '==', 'team'));
-    } else {
-      q = query(col, where('chantierMemberIds', 'array-contains', userId));
-    }
-  }
+  const q =
+    chantier.ownerId === userId
+      ? query(col, where('chantierOwnerId', '==', userId))
+      : query(col, where('chantierReaderIds', 'array-contains', userId));
 
   return onSnapshot(
     q,
     (snap) => {
-      const list = snap.docs.map((d) => d.data() as Journal);
+      const list = snap.docs.map((d) => {
+        const raw = d.data() as Journal;
+        return {
+          ...raw,
+          status: raw.status === 'completed' ? ('completed' as const) : ('in_progress' as const),
+          signatureControleur: raw.signatureControleur ?? null,
+          signatureLecteur: raw.signatureLecteur ?? null,
+        };
+      });
       list.sort(
         (a, b) =>
           (a.date || '').localeCompare(b.date || '') ||
@@ -477,8 +511,7 @@ export function subscribeChantierJournaux(
 
 export async function saveChantierCloud(
   chantier: Chantier,
-  user: User,
-  isAdmin: boolean
+  user: User
 ): Promise<Chantier> {
   const id = sanitizeDocId(chantier.id);
   const ref = doc(db, 'chantiers', id);
@@ -504,24 +537,12 @@ export async function saveChantierCloud(
         id,
         ownerId: user.uid,
         ownerName,
-        visibility: payload.visibility,
-        memberIds: payload.memberIds,
+        visibility: 'private',
+        readerIds: payload.readerIds,
       };
     }
 
     const existingData = snap.data() as Chantier & { createdAt?: unknown };
-    const isOwnerOrAdmin = isAdmin || existingData.ownerId === user.uid;
-    const visibility = isOwnerOrAdmin
-      ? chantier.visibility === 'private'
-        ? 'private'
-        : 'team'
-      : existingData.visibility || 'team';
-    const memberIds = isOwnerOrAdmin
-      ? clampStrList(chantier.memberIds || [], 50, 128).filter((x) =>
-          /^[a-zA-Z0-9_-]+$/.test(x)
-        )
-      : existingData.memberIds || [];
-
     const updateFields: Record<string, unknown> = {
       numero: clampStr(chantier.numero, 100),
       projet: clampStr(chantier.projet, 250),
@@ -536,39 +557,15 @@ export async function saveChantierCloud(
       updatedAt: serverTimestamp(),
     };
 
-    if (isOwnerOrAdmin) {
-      updateFields.visibility = visibility;
-      updateFields.memberIds = memberIds;
-    }
-
     await updateDoc(ref, updateFields);
-
-    // Sync child journal visibility/members if owner/admin changed them
-    if (
-      isOwnerOrAdmin &&
-      (visibility !== existingData.visibility ||
-        JSON.stringify(memberIds) !==
-          JSON.stringify(existingData.memberIds || []))
-    ) {
-      const jSnap = await getDocs(collection(db, 'chantiers', id, 'journaux'));
-      const batch = writeBatch(db);
-      jSnap.docs.forEach((jd) => {
-        batch.update(jd.ref, {
-          chantierVisibility: visibility,
-          chantierMemberIds: memberIds,
-          updatedAt: serverTimestamp(),
-        });
-      });
-      if (!jSnap.empty) await batch.commit();
-    }
 
     return {
       ...chantier,
       id,
       ownerId: existingData.ownerId,
       ownerName: existingData.ownerName,
-      visibility,
-      memberIds,
+      visibility: 'private',
+      readerIds: existingData.readerIds || [],
     };
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `chantiers/${id}`);
@@ -579,7 +576,6 @@ export async function deleteChantierCloud(chantierId: string): Promise<void> {
   const id = sanitizeDocId(chantierId);
   try {
     const jSnap = await getDocs(collection(db, 'chantiers', id, 'journaux'));
-    // Batch delete up to 400 docs per batch
     for (let i = 0; i < jSnap.docs.length; i += 400) {
       const batch = writeBatch(db);
       jSnap.docs.slice(i, i + 400).forEach((d) => batch.delete(d.ref));
@@ -614,10 +610,18 @@ export async function saveJournalCloud(
         true
       );
       await setDoc(ref, payload);
+      await updateDoc(doc(db, 'chantiers', cId), {
+        journalIds: arrayUnion(jId),
+        updatedAt: serverTimestamp(),
+      });
       return;
     }
 
+    const status: JournalStatus =
+      journal.status === 'completed' ? 'completed' : 'in_progress';
+
     await updateDoc(ref, {
+      status,
       journalNum: Math.max(1, Math.min(99999, Number(journal.journalNum) || 1)),
       date: clampStr(journal.date, 20),
       horaireDebut: clampStr(journal.horaireDebut, 20),
@@ -651,6 +655,32 @@ export async function saveJournalCloud(
   }
 }
 
+export async function signJournalPageCloud(
+  chantierId: string,
+  journalId: string,
+  role: 'controleur' | 'lecteur',
+  signature: PageSignatureRecord
+): Promise<void> {
+  const cId = sanitizeDocId(chantierId);
+  const jId = sanitizeDocId(journalId);
+  const ref = doc(db, 'chantiers', cId, 'journaux', jId);
+
+  try {
+    const fieldName =
+      role === 'controleur' ? 'signatureControleur' : 'signatureLecteur';
+    await updateDoc(ref, {
+      [fieldName]: signature,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(
+      error,
+      OperationType.UPDATE,
+      `chantiers/${cId}/journaux/${jId}`
+    );
+  }
+}
+
 export async function deleteJournalCloud(
   chantierId: string,
   journalId: string
@@ -659,6 +689,10 @@ export async function deleteJournalCloud(
   const jId = sanitizeDocId(journalId);
   try {
     await deleteDoc(doc(db, 'chantiers', cId, 'journaux', jId));
+    await updateDoc(doc(db, 'chantiers', cId), {
+      journalIds: arrayRemove(jId),
+      updatedAt: serverTimestamp(),
+    });
   } catch (error) {
     handleFirestoreError(
       error,
@@ -670,20 +704,14 @@ export async function deleteJournalCloud(
 
 export async function fetchAllJournalsForChantier(
   chantier: Chantier,
-  userId: string,
-  isAdmin: boolean
+  userId: string
 ): Promise<Journal[]> {
   const col = collection(db, 'chantiers', chantier.id, 'journaux');
-  let q = query(col);
-  if (!isAdmin) {
-    if (chantier.ownerId === userId) {
-      q = query(col, where('chantierOwnerId', '==', userId));
-    } else if ((chantier.visibility || 'team') === 'team') {
-      q = query(col, where('chantierVisibility', '==', 'team'));
-    } else {
-      q = query(col, where('chantierMemberIds', 'array-contains', userId));
-    }
-  }
+  const q =
+    chantier.ownerId === userId
+      ? query(col, where('chantierOwnerId', '==', userId))
+      : query(col, where('chantierReaderIds', 'array-contains', userId));
+
   try {
     const snap = await getDocs(q);
     return snap.docs
@@ -699,6 +727,341 @@ export async function fetchAllJournalsForChantier(
       OperationType.LIST,
       `chantiers/${chantier.id}/journaux`
     );
+  }
+}
+
+// Temporary Share Invites & Grants (strictly linked to 1 specific chantier)
+
+function generateInviteCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = crypto.getRandomValues(new Uint8Array(6));
+  let suffix = '';
+  for (let i = 0; i < bytes.length; i++) {
+    suffix += chars[bytes[i] % chars.length];
+  }
+  return `JDT-${suffix}`;
+}
+
+export async function createShareInvite(
+  chantier: Chantier,
+  user: User,
+  label: string,
+  durationHours: number
+): Promise<ShareInvite> {
+  const code = generateInviteCode();
+  const expiresAtDate = new Date(Date.now() + durationHours * 3600 * 1000);
+  const expiresTs = Timestamp.fromDate(expiresAtDate);
+  const ownerName =
+    user.displayName || user.email?.split('@')[0] || 'Contrôleur INASEP';
+
+  const payload = {
+    code,
+    chantierId: sanitizeDocId(chantier.id),
+    chantierNumero: clampStr(chantier.numero, 100),
+    chantierProjet: clampStr(chantier.projet, 250),
+    ownerId: user.uid,
+    ownerName: clampStr(ownerName, 120),
+    label: clampStr(label.trim() || 'Lecteur temporaire', 150),
+    active: true,
+    usedByUid: '',
+    expiresAt: expiresTs,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+
+  try {
+    await setDoc(doc(db, 'shareInvites', code), payload);
+    return {
+      code,
+      chantierId: payload.chantierId,
+      chantierNumero: payload.chantierNumero,
+      chantierProjet: payload.chantierProjet,
+      ownerId: payload.ownerId,
+      ownerName: payload.ownerName,
+      label: payload.label,
+      active: true,
+      usedByUid: '',
+      expiresAtMs: expiresAtDate.getTime(),
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `shareInvites/${code}`);
+  }
+}
+
+export function subscribeOwnerShareInvites(
+  chantierId: string,
+  ownerId: string,
+  onData: (invites: ShareInvite[]) => void
+): Unsubscribe {
+  const q = query(
+    collection(db, 'shareInvites'),
+    where('ownerId', '==', ownerId)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list = snap.docs
+        .map((d) => {
+          const raw = d.data();
+          return {
+            code: String(raw.code || d.id),
+            chantierId: String(raw.chantierId),
+            chantierNumero: String(raw.chantierNumero || ''),
+            chantierProjet: String(raw.chantierProjet || ''),
+            ownerId: String(raw.ownerId),
+            ownerName: String(raw.ownerName || ''),
+            label: String(raw.label || ''),
+            active: Boolean(raw.active),
+            usedByUid: String(raw.usedByUid || ''),
+            expiresAtMs: raw.expiresAt?.toMillis?.() ?? 0,
+          } satisfies ShareInvite;
+        })
+        .filter((inv) => inv.chantierId === chantierId)
+        .sort((a, b) => b.expiresAtMs - a.expiresAtMs);
+      onData(list);
+    },
+    () => onData([])
+  );
+}
+
+export function subscribeOwnerChantierShares(
+  chantierId: string,
+  ownerId: string,
+  onData: (shares: ChantierShare[]) => void
+): Unsubscribe {
+  const q = query(
+    collection(db, 'chantierShares'),
+    where('chantierOwnerId', '==', ownerId)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list = snap.docs
+        .map((d) => {
+          const raw = d.data();
+          return {
+            id: String(raw.id || d.id),
+            chantierId: String(raw.chantierId),
+            chantierOwnerId: String(raw.chantierOwnerId),
+            inviteCode: String(raw.inviteCode),
+            readerUid: String(raw.readerUid),
+            readerName: String(raw.readerName || ''),
+            label: String(raw.label || ''),
+            revoked: Boolean(raw.revoked),
+            expiresAtMs: raw.expiresAt?.toMillis?.() ?? 0,
+          } satisfies ChantierShare;
+        })
+        .filter((s) => s.chantierId === chantierId)
+        .sort((a, b) => b.expiresAtMs - a.expiresAtMs);
+      onData(list);
+    },
+    () => onData([])
+  );
+}
+
+export async function redeemShareInvite(
+  rawCode: string,
+  user: User
+): Promise<{ chantierId: string; chantierProjet: string }> {
+  const code = rawCode.trim().toUpperCase();
+  if (!/^[a-zA-Z0-9_-]{4,64}$/.test(code)) {
+    throw new Error("Format de code d'accès invalide.");
+  }
+
+  const inviteRef = doc(db, 'shareInvites', code);
+  const inviteSnap = await getDoc(inviteRef);
+  if (!inviteSnap.exists()) {
+    throw new Error("Ce code d'accès temporaire n'existe pas ou a été supprimé.");
+  }
+
+  const inv = inviteSnap.data();
+  const expiresAtMs = inv.expiresAt?.toMillis?.() ?? 0;
+  if (!inv.active) {
+    throw new Error("Ce code d'accès temporaire a été révoqué.");
+  }
+  if (expiresAtMs <= Date.now()) {
+    throw new Error("Ce code d'accès temporaire a expiré.");
+  }
+  if (inv.ownerId === user.uid) {
+    throw new Error('Vous êtes déjà propriétaire de ce chantier.');
+  }
+  if (inv.usedByUid && inv.usedByUid !== user.uid) {
+    throw new Error("Ce code d'accès a déjà été utilisé par un autre compte.");
+  }
+
+  const chantierId = String(inv.chantierId);
+  const shareId = `${chantierId}_${user.uid}`;
+  const shareRef = doc(db, 'chantierShares', shareId);
+  const readerName = clampStr(
+    user.displayName || user.email?.split('@')[0] || 'Lecteur',
+    120
+  );
+
+  try {
+    if (!inv.usedByUid) {
+      await updateDoc(inviteRef, {
+        usedByUid: user.uid,
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    const existingShare = await getDoc(shareRef);
+    if (!existingShare.exists()) {
+      await setDoc(shareRef, {
+        id: shareId,
+        chantierId,
+        chantierOwnerId: String(inv.ownerId),
+        inviteCode: code,
+        readerUid: user.uid,
+        readerName,
+        label: clampStr(inv.label || readerName, 150),
+        revoked: false,
+        expiresAt: inv.expiresAt,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await updateDoc(shareRef, {
+        inviteCode: code,
+        expiresAt: inv.expiresAt,
+        revoked: false,
+        label: clampStr(inv.label || readerName, 150),
+        readerName,
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    // Bind readerUid to chantier and its journals so list queries match immediately
+    const chRef = doc(db, 'chantiers', chantierId);
+    await updateDoc(chRef, {
+      readerIds: arrayUnion(user.uid),
+      updatedAt: serverTimestamp(),
+    });
+
+    const chSnap = await getDoc(chRef);
+    const knownJournalIds: string[] = Array.isArray(chSnap.data()?.journalIds)
+      ? chSnap.data()!.journalIds
+      : [];
+
+    if (knownJournalIds.length > 0) {
+      for (let i = 0; i < knownJournalIds.length; i += 350) {
+        const batch = writeBatch(db);
+        knownJournalIds.slice(i, i + 350).forEach((jId) => {
+          batch.update(doc(db, 'chantiers', chantierId, 'journaux', jId), {
+            chantierReaderIds: arrayUnion(user.uid),
+            updatedAt: serverTimestamp(),
+          });
+        });
+        await batch.commit();
+      }
+    }
+
+    return {
+      chantierId,
+      chantierProjet: String(inv.chantierProjet || inv.chantierNumero || chantierId),
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `chantierShares/${shareId}`);
+  }
+}
+
+export async function syncPendingReadersToJournals(
+  chantier: Chantier,
+  ownerUid: string,
+  activeReaderIds: string[]
+): Promise<void> {
+  if (chantier.ownerId !== ownerUid || !activeReaderIds.length) return;
+  try {
+    const chRef = doc(db, 'chantiers', chantier.id);
+    const currentReaders = new Set(chantier.readerIds || []);
+    const missingOnCh = activeReaderIds.filter((id) => !currentReaders.has(id));
+    if (missingOnCh.length > 0) {
+      await updateDoc(chRef, {
+        readerIds: arrayUnion(...missingOnCh),
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    const jSnap = await getDocs(
+      query(
+        collection(db, 'chantiers', chantier.id, 'journaux'),
+        where('chantierOwnerId', '==', ownerUid)
+      )
+    );
+    const toUpdate = jSnap.docs.filter((d) => {
+      const rIds: string[] = Array.isArray(d.data().chantierReaderIds)
+        ? d.data().chantierReaderIds
+        : [];
+      return activeReaderIds.some((id) => !rIds.includes(id));
+    });
+    for (let i = 0; i < toUpdate.length; i += 350) {
+      const batch = writeBatch(db);
+      toUpdate.slice(i, i + 350).forEach((d) => {
+        batch.update(d.ref, {
+          chantierReaderIds: arrayUnion(...activeReaderIds),
+          updatedAt: serverTimestamp(),
+        });
+      });
+      await batch.commit();
+    }
+  } catch {
+    // non-fatal background sync
+  }
+}
+
+export async function revokeChantierShare(share: ChantierShare): Promise<void> {
+  try {
+    await updateDoc(doc(db, 'chantierShares', share.id), {
+      revoked: true,
+      updatedAt: serverTimestamp(),
+    });
+    if (share.inviteCode) {
+      try {
+        await updateDoc(doc(db, 'shareInvites', share.inviteCode), {
+          active: false,
+          updatedAt: serverTimestamp(),
+        });
+      } catch {
+        // invite may already be deleted
+      }
+    }
+    await updateDoc(doc(db, 'chantiers', share.chantierId), {
+      readerIds: arrayRemove(share.readerUid),
+      updatedAt: serverTimestamp(),
+    });
+    const jSnap = await getDocs(
+      query(
+        collection(db, 'chantiers', share.chantierId, 'journaux'),
+        where('chantierOwnerId', '==', share.chantierOwnerId)
+      )
+    );
+    for (let i = 0; i < jSnap.docs.length; i += 350) {
+      const batch = writeBatch(db);
+      jSnap.docs.slice(i, i + 350).forEach((d) => {
+        batch.update(d.ref, {
+          chantierReaderIds: arrayRemove(share.readerUid),
+          updatedAt: serverTimestamp(),
+        });
+      });
+      await batch.commit();
+    }
+  } catch (error) {
+    handleFirestoreError(
+      error,
+      OperationType.UPDATE,
+      `chantierShares/${share.id}`
+    );
+  }
+}
+
+export async function deactivateShareInvite(code: string): Promise<void> {
+  try {
+    await updateDoc(doc(db, 'shareInvites', code), {
+      active: false,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `shareInvites/${code}`);
   }
 }
 
@@ -723,7 +1086,7 @@ export async function fetchAllUsersAdmin(): Promise<UserProfile[]> {
           uid: pub.uid || d.id,
           displayName: pub.displayName || 'Utilisateur',
           role: pub.role === 'admin' ? ('admin' as const) : ('user' as const),
-          active: typeof pub.active === 'boolean' ? pub.active : true,
+          active: typeof pub.active === 'boolean' ? pub.active : false,
           defaultPrepose: String(pub.defaultPrepose || ''),
           defaultHoraireDebut: String(pub.defaultHoraireDebut || '07:30'),
           defaultHoraireFin: String(pub.defaultHoraireFin || '16:30'),
@@ -755,7 +1118,7 @@ export async function importLocalDbToCloud(
 
     const cRef = doc(db, 'chantiers', cId);
     const cPayload = sanitizeChantierPayload(
-      { ...ch, id: cId, visibility: ch.visibility || 'team' },
+      { ...ch, id: cId, visibility: 'private', readerIds: [] },
       user.uid,
       ownerName,
       true
@@ -779,8 +1142,8 @@ export async function importLocalDbToCloud(
             ...ch,
             id: cId,
             ownerId: user.uid,
-            visibility: cPayload.visibility,
-            memberIds: cPayload.memberIds,
+            visibility: 'private',
+            readerIds: [],
           },
           user.uid,
           ownerName,

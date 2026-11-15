@@ -8,6 +8,7 @@ interface AutocompleteInputProps {
   multiline?: boolean;
   rows?: number;
   className?: string;
+  disabled?: boolean;
 }
 
 export function AutocompleteInput({
@@ -18,6 +19,7 @@ export function AutocompleteInput({
   multiline = false,
   rows = 2,
   className = '',
+  disabled = false,
 }: AutocompleteInputProps) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -54,6 +56,7 @@ export function AutocompleteInput({
   }, []);
 
   const selectSuggestion = (item: string) => {
+    if (disabled) return;
     onChange(item);
     setOpen(false);
     setActiveIndex(-1);
@@ -62,7 +65,7 @@ export function AutocompleteInput({
   const handleKeyDown = (
     e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>
   ) => {
-    if (!open || !matches.length) return;
+    if (disabled || !open || !matches.length) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       setActiveIndex((prev) => (prev + 1) % matches.length);
@@ -77,7 +80,7 @@ export function AutocompleteInput({
     }
   };
 
-  const baseInputClass = `w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-[#0a5b9c] focus:ring-2 focus:ring-[#0a5b9c]/15 ${className}`;
+  const baseInputClass = `w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-[#0a5b9c] focus:ring-2 focus:ring-[#0a5b9c]/15 disabled:bg-slate-50 disabled:text-slate-600 ${className}`;
 
   return (
     <div ref={containerRef} className="relative flex-1 min-w-0">
@@ -85,11 +88,14 @@ export function AutocompleteInput({
         <textarea
           rows={rows}
           value={value}
+          disabled={disabled}
           onChange={(e) => {
             onChange(e.target.value);
-            setOpen(true);
+            if (!disabled) setOpen(true);
           }}
-          onFocus={() => setOpen(true)}
+          onFocus={() => {
+            if (!disabled) setOpen(true);
+          }}
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
           aria-autocomplete="list"
@@ -100,11 +106,14 @@ export function AutocompleteInput({
         <input
           type="text"
           value={value}
+          disabled={disabled}
           onChange={(e) => {
             onChange(e.target.value);
-            setOpen(true);
+            if (!disabled) setOpen(true);
           }}
-          onFocus={() => setOpen(true)}
+          onFocus={() => {
+            if (!disabled) setOpen(true);
+          }}
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
           aria-autocomplete="list"
@@ -113,7 +122,7 @@ export function AutocompleteInput({
         />
       )}
 
-      {open && matches.length > 0 && (
+      {!disabled && open && matches.length > 0 && (
         <div
           id={listId}
           role="listbox"

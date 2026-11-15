@@ -226,10 +226,72 @@ export function A4JournalSheet({
           <div className="a4-sign-text">
             {chantier.preposeSurveillance || ''}
           </div>
+          {journal.signatureControleur && (
+            <div
+              style={{
+                marginTop: '6px',
+                padding: '4px 6px',
+                border: '1px solid #0a5b9c',
+                backgroundColor: '#f4f8fc',
+                fontSize: '7.5pt',
+                lineHeight: 1.35,
+                color: '#0f172a',
+              }}
+            >
+              <div style={{ fontWeight: 700, color: '#0a5b9c' }}>
+                ✓ Authentifié via{' '}
+                {journal.signatureControleur.method === 'itsme'
+                  ? 'itsme®'
+                  : 'Carte eID'}
+              </div>
+              <div>Signataire : {journal.signatureControleur.signerName}</div>
+              <div>
+                Le :{' '}
+                {new Date(journal.signatureControleur.signedAt).toLocaleString(
+                  'fr-BE'
+                )}
+              </div>
+              <div style={{ fontFamily: 'monospace', fontSize: '6.8pt' }}>
+                Réf. {journal.signatureControleur.verificationId}
+              </div>
+            </div>
+          )}
         </div>
         <div className="a4-sign-cell">
-          <div className="a4-sign-label">L&apos;entrepreneur</div>
+          <div className="a4-sign-label">
+            L&apos;entrepreneur / Lecteur autorisé
+          </div>
           <div className="a4-sign-text">{journal.sigEntrepreneur || ''}</div>
+          {journal.signatureLecteur && (
+            <div
+              style={{
+                marginTop: '6px',
+                padding: '4px 6px',
+                border: '1px solid #15803d',
+                backgroundColor: '#f3fbf6',
+                fontSize: '7.5pt',
+                lineHeight: 1.35,
+                color: '#0f172a',
+              }}
+            >
+              <div style={{ fontWeight: 700, color: '#15803d' }}>
+                ✓ Authentifié via{' '}
+                {journal.signatureLecteur.method === 'itsme'
+                  ? 'itsme®'
+                  : 'Carte eID'}
+              </div>
+              <div>Signataire : {journal.signatureLecteur.signerName}</div>
+              <div>
+                Le :{' '}
+                {new Date(journal.signatureLecteur.signedAt).toLocaleString(
+                  'fr-BE'
+                )}
+              </div>
+              <div style={{ fontFamily: 'monospace', fontSize: '6.8pt' }}>
+                Réf. {journal.signatureLecteur.verificationId}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

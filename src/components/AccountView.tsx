@@ -8,10 +8,9 @@ import {
 } from 'firebase/auth';
 import { useEffect, useState } from 'react';
 import {
+  Clock,
   FolderOpen,
-  Globe,
   KeyRound,
-  Lock,
   Save,
   Shield,
   Trash2,
@@ -21,7 +20,7 @@ import {
   UserX,
 } from 'lucide-react';
 import { auth } from '../firebase';
-import type { Chantier, UserProfile } from '../types';
+import type { UserProfile } from '../types';
 import {
   createUserAccountAdmin,
   deleteUserProfileAdmin,
@@ -42,9 +41,7 @@ interface AccountViewProps {
   user: User;
   profile: UserProfile;
   isAdmin: boolean;
-  chantiers: Chantier[];
   onProfileUpdated: (next: UserProfile) => void;
-  onEditChantier: (ch: Chantier) => void;
   onNotify: (msg: string, tone?: 'default' | 'success' | 'error') => void;
 }
 
@@ -52,9 +49,7 @@ export function AccountView({
   user,
   profile,
   isAdmin,
-  chantiers,
   onProfileUpdated,
-  onEditChantier,
   onNotify,
 }: AccountViewProps) {
   // Preferences form
@@ -83,13 +78,12 @@ export function AccountView({
     string | null
   >(null);
 
-  // Admin: Account management subsection
+  // Sole Admin: Account authorization & management
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [newUserName, setNewUserName] = useState('');
   const [newUserEmail, setNewUserEmail] = useState('');
   const [newUserPwd, setNewUserPwd] = useState('');
-  const [newUserRole, setNewUserRole] = useState<'user' | 'admin'>('user');
   const [creatingUser, setCreatingUser] = useState(false);
 
   const hasPasswordProvider = user.providerData.some(
@@ -252,7 +246,6 @@ export function AccountView({
         displayName: newUserName.trim() || newUserEmail.split('@')[0],
         email: newUserEmail.trim(),
         password: newUserPwd,
-        role: newUserRole,
       });
       setUsers((prev) =>
         [...prev, created].sort((a, b) =>
@@ -262,9 +255,8 @@ export function AccountView({
       setNewUserName('');
       setNewUserEmail('');
       setNewUserPwd('');
-      setNewUserRole('user');
       onNotify(
-        `Compte créé pour ${created.email} (e-mail de vérification envoyé).`,
+        `Compte créé et autorisé pour ${created.email} (e-mail de vérification envoyé).`,
         'success'
       );
     } catch (err) {
@@ -284,24 +276,6 @@ export function AccountView({
     }
   };
 
-  const handleToggleRole = async (target: UserProfile) => {
-    const nextRole = target.role === 'admin' ? 'user' : 'admin';
-    try {
-      await updateUserAdmin(target.uid, { role: nextRole });
-      setUsers((prev) =>
-        prev.map((u) => (u.uid === target.uid ? { ...u, role: nextRole } : u))
-      );
-      onNotify(
-        `${target.displayName} est maintenant ${
-          nextRole === 'admin' ? 'Administrateur' : 'Utilisateur'
-        }.`,
-        'success'
-      );
-    } catch {
-      onNotify('Impossible de modifier le rôle.', 'error');
-    }
-  };
-
   const handleToggleActive = async (target: UserProfile) => {
     const nextActive = !target.active;
     try {
@@ -312,8 +286,10 @@ export function AccountView({
         )
       );
       onNotify(
-        nextActive ? 'Compte réactivé.' : 'Compte désactivé.',
-        'default'
+        nextActive
+          ? `Accès autorisé pour ${target.displayName}.`
+          : `Accès suspendu pour ${target.displayName}.`,
+        nextActive ? 'success' : 'default'
       );
     } catch {
       onNotify('Impossible de modifier le statut.', 'error');
@@ -330,6 +306,9 @@ export function AccountView({
     }
   };
 
+  const pendingUsers = users.filter((u) => !u.active && u.uid !== user.uid);
+  const authorizedUsers = users.filter((u) => u.active || u.uid === user.uid);
+
   return (
     <div className="space-y-6 max-w-4xl mx-auto">
       {/* Header */}
@@ -339,7 +318,7 @@ export function AccountView({
             Mon compte
           </h1>
           <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-            {user.email} · {isAdmin ? 'Administrateur' : 'Utilisateur'}
+            {user.email} · {isAdmin ? 'Administrateur unique' : 'Utilisateur autorisé'}
           </p>
         </div>
       </div>
@@ -431,7 +410,7 @@ export function AccountView({
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
             {fsSupported
-              ? 'Utilisés automatiquement lors de la validation PDF si aucun dossier spécifique n’est défini sur le chantier.'
+              ? 'Utilisés automatiquement lors du téléchargement PDF si aucun dossier spécifique n’est défini sur le chantier.'
               : 'Sur ce navigateur (ex. Safari iOS), les fichiers PDF sont enregistrés dans Téléchargements / Fichiers.'}
           </p>
         </div>
@@ -595,23 +574,78 @@ export function AccountView({
         </div>
       </form>
 
-      {/* 4. Sous-section Admin : Gestion des comptes & accès */}
+      {/* 4. Sous-section Admin unique : Autorisation & gestion des comptes */}
       {isAdmin && (
         <section className="rounded-2xl border border-slate-200 bg-white p-5 space-y-6">
-          <div className="flex items-center gap-2.5 border-b border-slate-100 pb-4">
-            <div className="w-9 h-9 rounded-xl bg-[#0a5b9c]/10 text-[#0a5b9c] flex items-center justify-center shrink-0">
-              <Shield className="w-5 h-5" />
+          <div className="flex items-center justify-between gap-2.5 border-b border-slate-100 pb-4">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-[#0a5b9c]/10 text-[#0a5b9c] flex items-center justify-center shrink-0">
+                <Shield className="w-5 h-5" />
+              </div>
+              <div>
+                <h2 className="text-base font-bold text-slate-900">
+                  Gestion &amp; autorisation des comptes (Administrateur unique)
+                </h2>
+                <p className="text-xs text-slate-500">
+                  Vous êtes seul administrateur : autorisez ou suspendez
+                  l&apos;accès des utilisateurs. Chaque utilisateur gère ses
+                  propres chantiers en toute confidentialité.
+                </p>
+              </div>
             </div>
-            <div>
-              <h2 className="text-base font-bold text-slate-900">
-                Gestion des comptes &amp; accès (Administrateur)
-              </h2>
-              <p className="text-xs text-slate-500">
-                Créez de nouveaux accès utilisateurs, gérez les rôles et contrôlez
-                la visibilité des chantiers.
-              </p>
-            </div>
+            <button
+              type="button"
+              onClick={() => void loadAdminUsers()}
+              className="min-h-[38px] px-3 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700 cursor-pointer shrink-0"
+            >
+              Actualiser
+            </button>
           </div>
+
+          {/* Pending Authorization Requests */}
+          {pendingUsers.length > 0 && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-4 space-y-3">
+              <div className="text-xs font-bold uppercase tracking-wider text-amber-900 flex items-center gap-1.5">
+                <Clock className="w-4 h-4 text-amber-700" />
+                Comptes en attente d&apos;autorisation ({pendingUsers.length})
+              </div>
+              <div className="rounded-xl border border-amber-200 bg-white divide-y divide-amber-100 overflow-hidden">
+                {pendingUsers.map((u) => (
+                  <div
+                    key={u.uid}
+                    className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-sm font-bold text-slate-900 truncate">
+                        {u.displayName}
+                      </div>
+                      <div className="text-xs text-slate-500 truncate">
+                        {u.email || u.uid} · En attente d&apos;activation
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleToggleActive(u)}
+                        className="min-h-[38px] px-3.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <UserCheck className="w-3.5 h-3.5" />
+                        Autoriser l&apos;accès
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveProfile(u)}
+                        className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg border border-slate-200 text-slate-400 hover:text-red-600 hover:border-red-200 cursor-pointer"
+                        title="Refuser / supprimer"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Create collaborator form */}
           <form
@@ -620,10 +654,10 @@ export function AccountView({
           >
             <div className="text-xs font-bold uppercase tracking-wide text-slate-700 flex items-center gap-1.5">
               <UserPlus className="w-4 h-4 text-[#0a5b9c]" />
-              Ajouter un utilisateur
+              Créer et autoriser directement un utilisateur
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <input
                 type="text"
                 value={newUserName}
@@ -635,7 +669,7 @@ export function AccountView({
                 type="email"
                 value={newUserEmail}
                 onChange={(e) => setNewUserEmail(e.target.value)}
-                placeholder="email@inasep.be"
+                placeholder="email@exemple.be"
                 className="min-h-[44px] px-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 focus:outline-none focus:border-[#0a5b9c]"
               />
               <input
@@ -645,16 +679,6 @@ export function AccountView({
                 placeholder="Mot de passe (min. 6)"
                 className="min-h-[44px] px-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 focus:outline-none focus:border-[#0a5b9c]"
               />
-              <select
-                value={newUserRole}
-                onChange={(e) =>
-                  setNewUserRole(e.target.value as 'user' | 'admin')
-                }
-                className="min-h-[44px] px-3 rounded-xl border border-slate-200 bg-white text-sm font-medium text-slate-900 focus:outline-none focus:border-[#0a5b9c]"
-              >
-                <option value="user">Utilisateur</option>
-                <option value="admin">Administrateur</option>
-              </select>
             </div>
 
             <div className="flex justify-end">
@@ -664,29 +688,29 @@ export function AccountView({
                 className="min-h-[44px] px-4 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white text-sm font-semibold flex items-center gap-2 cursor-pointer disabled:opacity-60"
               >
                 <UserPlus className="w-4 h-4" />
-                {creatingUser ? 'Création…' : 'Créer le compte'}
+                {creatingUser ? 'Création…' : 'Créer et autoriser'}
               </button>
             </div>
           </form>
 
-          {/* Registered users list */}
+          {/* Authorized users list */}
           <div className="space-y-2.5">
             <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
               <Users className="w-4 h-4" />
-              Comptes enregistrés ({users.length})
+              Comptes autorisés ({authorizedUsers.length})
             </h3>
 
             {loadingUsers ? (
               <div className="p-4 rounded-xl border border-slate-200 text-xs text-slate-500">
                 Chargement des comptes…
               </div>
-            ) : users.length === 0 ? (
+            ) : authorizedUsers.length === 0 ? (
               <div className="p-4 rounded-xl border border-slate-200 text-xs text-slate-500">
                 Aucun autre compte enregistré.
               </div>
             ) : (
               <div className="rounded-xl border border-slate-200 divide-y divide-slate-100 overflow-hidden">
-                {users.map((u) => {
+                {authorizedUsers.map((u) => {
                   const isSelf = u.uid === user.uid;
                   return (
                     <div
@@ -696,12 +720,13 @@ export function AccountView({
                       <div className="min-w-0">
                         <div className="text-sm font-bold text-slate-900 truncate">
                           {u.displayName}
-                          {isSelf ? ' (moi)' : ''}
-                          {!u.active ? ' · Désactivé' : ''}
+                          {isSelf ? ' (moi — Admin)' : ''}
                         </div>
                         <div className="text-xs text-slate-500 truncate">
                           {u.email || u.uid} ·{' '}
-                          {u.role === 'admin' ? 'Admin' : 'Utilisateur'}
+                          {u.role === 'admin'
+                            ? 'Administrateur unique'
+                            : 'Utilisateur autorisé'}
                         </div>
                       </div>
 
@@ -709,33 +734,11 @@ export function AccountView({
                         <div className="flex flex-wrap items-center gap-2 shrink-0">
                           <button
                             type="button"
-                            onClick={() => handleToggleRole(u)}
-                            className="min-h-[38px] px-3 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700 cursor-pointer"
-                          >
-                            {u.role === 'admin'
-                              ? 'Passer Utilisateur'
-                              : 'Passer Admin'}
-                          </button>
-                          <button
-                            type="button"
                             onClick={() => handleToggleActive(u)}
-                            className={`min-h-[38px] px-3 rounded-lg border text-xs font-semibold flex items-center gap-1 cursor-pointer ${
-                              u.active
-                                ? 'border-amber-200 text-amber-800 hover:bg-amber-50'
-                                : 'border-emerald-200 text-emerald-800 hover:bg-emerald-50'
-                            }`}
+                            className="min-h-[38px] px-3 rounded-lg border border-amber-200 text-amber-800 hover:bg-amber-50 text-xs font-semibold flex items-center gap-1 cursor-pointer"
                           >
-                            {u.active ? (
-                              <>
-                                <UserX className="w-3.5 h-3.5" />
-                                Désactiver
-                              </>
-                            ) : (
-                              <>
-                                <UserCheck className="w-3.5 h-3.5" />
-                                Activer
-                              </>
-                            )}
+                            <UserX className="w-3.5 h-3.5" />
+                            Suspendre
                           </button>
                           <button
                             type="button"
@@ -752,55 +755,6 @@ export function AccountView({
                 })}
               </div>
             )}
-          </div>
-
-          {/* Chantiers Access Overview */}
-          <div className="space-y-2.5">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-              Accès par chantier ({chantiers.length})
-            </h3>
-            <div className="rounded-xl border border-slate-200 divide-y divide-slate-100 overflow-hidden">
-              {chantiers.map((ch) => {
-                const isPrivate = ch.visibility === 'private';
-                return (
-                  <div
-                    key={ch.id}
-                    className="px-4 py-3 flex items-center justify-between gap-3 bg-white"
-                  >
-                    <div className="min-w-0">
-                      <div className="text-sm font-bold text-slate-900 truncate">
-                        {ch.numero ? `${ch.numero} — ` : ''}
-                        {ch.projet || 'Projet sans titre'}
-                      </div>
-                      <div className="text-xs text-slate-500 truncate mt-0.5 flex items-center gap-1.5">
-                        {isPrivate ? (
-                          <Lock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                        ) : (
-                          <Globe className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                        )}
-                        <span>
-                          {isPrivate
-                            ? `Privé (${(ch.memberIds || []).length} membre(s))`
-                            : 'Équipe (partagé)'}
-                        </span>
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => onEditChantier(ch)}
-                      className="min-h-[38px] px-3 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700 cursor-pointer shrink-0"
-                    >
-                      Gérer l&apos;accès
-                    </button>
-                  </div>
-                );
-              })}
-              {chantiers.length === 0 && (
-                <div className="p-4 text-xs text-slate-500">
-                  Aucun chantier créé.
-                </div>
-              )}
-            </div>
           </div>
         </section>
       )}

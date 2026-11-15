@@ -1,7 +1,7 @@
 import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import { Ban, LogOut, UserCircle2 } from 'lucide-react';
+import { Clock, LogOut, RefreshCw, UserCircle2 } from 'lucide-react';
 import { A4JournalSheet } from './components/A4JournalSheet';
 import { AccountView } from './components/AccountView';
 import { AuthScreen } from './components/AuthScreen';
@@ -12,12 +12,15 @@ import { ConfirmModal } from './components/ConfirmModal';
 import { JournalEditorView } from './components/JournalEditorView';
 import { JsonImportModal } from './components/JsonImportModal';
 import { PdfProgressModal } from './components/PdfProgressModal';
+import { ShareAccessModal } from './components/ShareAccessModal';
+import { SignatureModal } from './components/SignatureModal';
 import { Toast, type ToastState } from './components/Toast';
 import { auth, isAdminEmail } from './firebase';
 import {
   APP_SIGNATURE,
   INASEP_LOGO_DATA_URL,
   type Chantier,
+  type ChantierShare,
   type DB,
   type Journal,
   type UserProfile,
@@ -27,6 +30,7 @@ import {
   buildWeeklyFilename,
   fmtDateFR,
   todayISO,
+  weekKey,
 } from './utils/dates';
 import {
   deleteChantierCloud,
@@ -34,13 +38,21 @@ import {
   ensureUserProfile,
   fetchAllJournalsForChantier,
   importLocalDbToCloud,
+  redeemShareInvite,
   saveChantierCloud,
   saveJournalCloud,
+  signJournalPageCloud,
   subscribeChantierJournaux,
   subscribeChantiers,
+  subscribeOwnerChantierShares,
+  syncPendingReadersToJournals,
 } from './utils/firestoreService';
 import { generateAndDeliverPdf, type PdfProgress } from './utils/pdfExport';
 import { exportShareableHTML } from './utils/shareHtml';
+import {
+  signJournalPageWithSession,
+  type VerifiedSigningSession,
+} from './utils/signatureCrypto';
 import {
   DEFAULT_DAY_FOLDER_KEY,
   DEFAULT_WEEK_FOLDER_KEY,
@@ -56,9 +68,15 @@ type ViewMode = 'chantiers' | 'chantier' | 'journal' | 'compte';
 export default function App() {
   const [authReady, setAuthReady] = useState(false);
   const [user, setUser] = useState<User | null>(null);
+  const [, setAuthTick] = useState(0);
   const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [checkingActivation, setCheckingActivation] = useState(false);
 
   const [chantiers, setChantiers] = useState<Chantier[]>([]);
+  const [shareByChantierId, setShareByChantierId] = useState<
+    Record<string, ChantierShare>
+  >({});
+  const [chantiersLoaded, setChantiersLoaded] = useState(false);
   const [chantierJournals, setChantierJournals] = useState<Journal[]>([]);
 
   const [view, setView] = useState<ViewMode>('chantiers');
@@ -73,6 +91,27 @@ export default function App() {
 
   const [chantierModalOpen, setChantierModalOpen] = useState(false);
   const [editingChantier, setEditingChantier] = useState<Chantier | null>(null);
+  const [shareAccessModalOpen, setShareAccessModalOpen] = useState(false);
+
+  // Single-verification signing session & modal state
+  const [signingSession, setSigningSession] =
+    useState<VerifiedSigningSession | null>(null);
+  const [signModalState, setSignModalState] = useState<{
+    role: 'controleur' | 'lecteur';
+    targetLabel: string;
+    targetJournals: Journal[];
+  } | null>(null);
+
+  const [pendingInviteCode, setPendingInviteCode] = useState<string | null>(
+    () => {
+      try {
+        const param = new URLSearchParams(window.location.search).get('invite');
+        return param ? param.trim().toUpperCase() : null;
+      } catch {
+        return null;
+      }
+    }
+  );
 
   const [confirmState, setConfirmState] = useState<{
     title: string;
@@ -104,7 +143,7 @@ export default function App() {
     user: User;
   } | null>(null);
 
-  const isAdmin = isAdminEmail(user?.email) || profile?.role === 'admin';
+  const isAdmin = isAdminEmail(user?.email);
 
   const notify = useCallback(
     (message: string, tone: 'default' | 'success' | 'error' = 'default') => {
@@ -114,7 +153,7 @@ export default function App() {
       setToast({ message, tone });
       toastTimerRef.current = window.setTimeout(() => {
         setToast(null);
-      }, 3200);
+      }, 3400);
     },
     []
   );
@@ -136,6 +175,7 @@ export default function App() {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (nextUser) => {
       setUser(nextUser);
+      setSigningSession(null);
       if (nextUser && nextUser.emailVerified) {
         try {
           const prof = await ensureUserProfile(nextUser);
@@ -146,7 +186,7 @@ export default function App() {
             displayName: nextUser.displayName || nextUser.email || 'Utilisateur',
             email: nextUser.email || undefined,
             role: isAdminEmail(nextUser.email) ? 'admin' : 'user',
-            active: true,
+            active: isAdminEmail(nextUser.email),
             defaultPrepose: isAdminEmail(nextUser.email) ? 'F. Pirquin' : '',
             defaultHoraireDebut: '07:30',
             defaultHoraireFin: '16:30',
@@ -162,15 +202,24 @@ export default function App() {
 
   // Subscribe to Chantiers when authenticated + verified + active
   useEffect(() => {
-    if (!user || !user.emailVerified || (profile && !profile.active)) {
+    const isAuthorized = Boolean(
+      user && user.emailVerified && (isAdmin || profile?.active)
+    );
+    if (!isAuthorized || !user) {
       setChantiers([]);
+      setShareByChantierId({});
       setChantierJournals([]);
+      setChantiersLoaded(false);
       return;
     }
+
     const unsub = subscribeChantiers(
       user.uid,
-      isAdmin,
-      setChantiers,
+      ({ chantiers: nextCh, shareByChantierId: nextShares }) => {
+        setChantiers(nextCh);
+        setShareByChantierId(nextShares);
+        setChantiersLoaded(true);
+      },
       () => {
         notify('Erreur de synchronisation des chantiers.', 'error');
       }
@@ -178,10 +227,69 @@ export default function App() {
     return () => unsub();
   }, [user, profile, isAdmin, notify]);
 
+  // Redeem pending URL ?invite=CODE automatically once user is approved & logged in
+  useEffect(() => {
+    if (
+      !pendingInviteCode ||
+      !user ||
+      !user.emailVerified ||
+      (!isAdmin && !profile?.active)
+    ) {
+      return;
+    }
+
+    const code = pendingInviteCode;
+    setPendingInviteCode(null);
+
+    try {
+      const cleanedUrl = new URL(window.location.href);
+      cleanedUrl.searchParams.delete('invite');
+      window.history.replaceState({}, '', cleanedUrl.toString());
+    } catch {
+      // ignore URL cleanup errors
+    }
+
+    void (async () => {
+      try {
+        const res = await redeemShareInvite(code, user);
+        setCurrentChantierId(res.chantierId);
+        setCurrentJournalId(null);
+        setView('chantier');
+        notify(
+          `Accès temporaire activé pour « ${res.chantierProjet} ».`,
+          'success'
+        );
+      } catch (err) {
+        notify(
+          err instanceof Error
+            ? err.message
+            : "Impossible d'activer ce code d'accès temporaire.",
+          'error'
+        );
+      }
+    })();
+  }, [pendingInviteCode, user, profile, isAdmin, notify]);
+
   const currentChantier = useMemo(
     () => chantiers.find((c) => c.id === currentChantierId) || null,
     [chantiers, currentChantierId]
   );
+
+  // If shared chantier expires or is revoked while open, return safely to Chantiers list
+  useEffect(() => {
+    if (
+      chantiersLoaded &&
+      currentChantierId &&
+      !currentChantier &&
+      (view === 'chantier' || view === 'journal')
+    ) {
+      setCurrentChantierId(null);
+      setCurrentJournalId(null);
+      setEditingJournalDraft(null);
+      setView('chantiers');
+      notify("L'accès à ce chantier a expiré ou a été révoqué.");
+    }
+  }, [chantiersLoaded, currentChantierId, currentChantier, view, notify]);
 
   // Subscribe to selected Chantier's journals
   useEffect(() => {
@@ -192,14 +300,38 @@ export default function App() {
     const unsub = subscribeChantierJournaux(
       currentChantier,
       user.uid,
-      isAdmin,
       setChantierJournals,
       () => {
         notify('Erreur de synchronisation des journaux.', 'error');
       }
     );
     return () => unsub();
-  }, [user, currentChantier, isAdmin, notify]);
+  }, [user, currentChantier, notify]);
+
+  // Background sync for chantier owner so all journals carry active reader UIDs
+  useEffect(() => {
+    if (!user || !currentChantier || currentChantier.ownerId !== user.uid) {
+      return;
+    }
+    const unsub = subscribeOwnerChantierShares(
+      currentChantier.id,
+      user.uid,
+      (shares) => {
+        const now = Date.now();
+        const activeReaderIds = shares
+          .filter((s) => !s.revoked && s.expiresAtMs > now)
+          .map((s) => s.readerUid);
+        if (activeReaderIds.length > 0) {
+          void syncPendingReadersToJournals(
+            currentChantier,
+            user.uid,
+            activeReaderIds
+          );
+        }
+      }
+    );
+    return () => unsub();
+  }, [user, currentChantier]);
 
   // Keep editingJournalDraft synced when opening a journal
   useEffect(() => {
@@ -219,6 +351,17 @@ export default function App() {
     }
     return chantierJournals.find((j) => j.id === currentJournalId) || null;
   }, [editingJournalDraft, chantierJournals, currentJournalId]);
+
+  const isCurrentJournalInCompletedWeek = useMemo(() => {
+    if (!currentJournal) return false;
+    const targetWk = weekKey(currentJournal.date);
+    const sameWeek = chantierJournals.filter(
+      (j) => weekKey(j.date) === targetWk
+    );
+    return (
+      sameWeek.length > 0 && sameWeek.every((j) => j.status === 'completed')
+    );
+  }, [chantierJournals, currentJournal]);
 
   const previousJournal = useMemo(() => {
     if (!currentJournal) return null;
@@ -287,11 +430,33 @@ export default function App() {
     }
   };
 
+  // Redeem invite code manually from ChantiersView
+  const handleRedeemInvite = async (code: string) => {
+    if (!user) return;
+    try {
+      const res = await redeemShareInvite(code, user);
+      setCurrentChantierId(res.chantierId);
+      setCurrentJournalId(null);
+      setView('chantier');
+      notify(
+        `Accès temporaire activé pour « ${res.chantierProjet} ».`,
+        'success'
+      );
+    } catch (err) {
+      notify(
+        err instanceof Error
+          ? err.message
+          : "Code d'accès temporaire invalide ou expiré.",
+        'error'
+      );
+    }
+  };
+
   // Chantier CRUD
   const handleSaveChantier = async (chantier: Chantier) => {
     if (!user) return;
     try {
-      const saved = await saveChantierCloud(chantier, user, isAdmin);
+      const saved = await saveChantierCloud(chantier, user);
       setChantierModalOpen(false);
       setEditingChantier(null);
       if (view === 'chantier' && currentChantierId === saved.id) {
@@ -329,6 +494,8 @@ export default function App() {
   // Journal CRUD
   const handleNewJournal = async () => {
     if (!currentChantier || !user) return;
+    if (currentChantier.ownerId !== user.uid) return;
+
     const sorted = [...chantierJournals].sort(
       (a, b) =>
         (b.date || '').localeCompare(a.date || '') ||
@@ -341,14 +508,14 @@ export default function App() {
       id: uid(),
       chantierId: currentChantier.id,
       chantierOwnerId: currentChantier.ownerId || user.uid,
-      chantierVisibility: currentChantier.visibility || 'team',
-      chantierMemberIds: currentChantier.memberIds || [],
+      chantierReaderIds: currentChantier.readerIds || [],
       authorId: user.uid,
       authorName:
         profile?.displayName ||
         user.displayName ||
         user.email?.split('@')[0] ||
         'Utilisateur',
+      status: 'in_progress',
       journalNum: maxNum + 1,
       date: todayISO(),
       horaireDebut:
@@ -369,6 +536,8 @@ export default function App() {
       decisions: [],
       visites: [],
       sigEntrepreneur: prevJournal?.sigEntrepreneur || '',
+      signatureControleur: null,
+      signatureLecteur: null,
     };
 
     try {
@@ -384,6 +553,8 @@ export default function App() {
 
   const handleDuplicateJournal = async (source: Journal) => {
     if (!currentChantier || !user) return;
+    if (currentChantier.ownerId !== user.uid) return;
+
     const maxNum = chantierJournals.reduce(
       (m, j) => Math.max(m, j.journalNum || 0),
       0
@@ -392,12 +563,15 @@ export default function App() {
     const copy: Journal = {
       ...source,
       id: uid(),
+      chantierOwnerId: currentChantier.ownerId || user.uid,
+      chantierReaderIds: currentChantier.readerIds || [],
       authorId: user.uid,
       authorName:
         profile?.displayName ||
         user.displayName ||
         user.email?.split('@')[0] ||
         'Utilisateur',
+      status: 'in_progress',
       journalNum: maxNum + 1,
       date: todayISO(),
       ouvriers: source.ouvriers.map((o) => ({ ...o })),
@@ -409,6 +583,8 @@ export default function App() {
       evenements: [...source.evenements],
       decisions: [...source.decisions],
       visites: [...source.visites],
+      signatureControleur: null,
+      signatureLecteur: null,
     };
 
     try {
@@ -451,6 +627,9 @@ export default function App() {
 
   const handleUpdateJournal = (updated: Journal) => {
     if (!currentChantier || !user) return;
+    if (currentChantier.ownerId !== user.uid) return;
+    if (updated.signatureControleur || updated.signatureLecteur) return;
+
     setEditingJournalDraft(updated);
     pendingSaveRef.current = {
       journal: updated,
@@ -463,6 +642,111 @@ export default function App() {
     saveTimerRef.current = window.setTimeout(() => {
       void flushPendingJournalSave();
     }, 350);
+  };
+
+  const handleToggleJournalStatus = async (
+    nextStatus: 'in_progress' | 'completed'
+  ) => {
+    if (!currentChantier || !currentJournal || !user) return;
+    if (currentChantier.ownerId !== user.uid) return;
+    if (currentJournal.signatureControleur || currentJournal.signatureLecteur) {
+      return;
+    }
+
+    const updated: Journal = { ...currentJournal, status: nextStatus };
+    setEditingJournalDraft(updated);
+    pendingSaveRef.current = null;
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+
+    try {
+      await saveJournalCloud(updated, currentChantier, user);
+      notify(
+        nextStatus === 'completed'
+          ? `Journal N° ${updated.journalNum} marqué comme terminé.`
+          : `Journal N° ${updated.journalNum} repassé en cours.`,
+        'success'
+      );
+    } catch {
+      notify('Impossible de mettre à jour le statut de la page.', 'error');
+    }
+  };
+
+  // Single-verification signing engine (1 verification -> 1 signature per page)
+  const executeSignJournals = useCallback(
+    async (
+      session: VerifiedSigningSession,
+      role: 'controleur' | 'lecteur',
+      journalsToSign: Journal[]
+    ) => {
+      if (!currentChantier) return;
+      await flushPendingJournalSave();
+
+      for (const j of journalsToSign) {
+        if (j.status !== 'completed') {
+          throw new Error(
+            `Le Journal N° ${j.journalNum} doit d'abord être marqué comme terminé.`
+          );
+        }
+        const sigRecord = await signJournalPageWithSession(
+          session,
+          role,
+          currentChantier,
+          j
+        );
+        await signJournalPageCloud(currentChantier.id, j.id, role, sigRecord);
+
+        setEditingJournalDraft((prev) => {
+          if (!prev || prev.id !== j.id) return prev;
+          return role === 'controleur'
+            ? { ...prev, signatureControleur: sigRecord }
+            : { ...prev, signatureLecteur: sigRecord };
+        });
+      }
+
+      notify(
+        `${journalsToSign.length} page${journalsToSign.length > 1 ? 's' : ''} signée${journalsToSign.length > 1 ? 's' : ''} (${session.method === 'itsme' ? 'itsme®' : 'Carte eID'}).`,
+        'success'
+      );
+    },
+    [currentChantier, flushPendingJournalSave, notify]
+  );
+
+  const handleRequestSignJournals = async (
+    journalsToSign: Journal[],
+    role: 'controleur' | 'lecteur',
+    targetLabel: string
+  ) => {
+    if (!user || !journalsToSign.length) return;
+    const unsigned = journalsToSign.filter((j) =>
+      role === 'controleur' ? !j.signatureControleur : !j.signatureLecteur
+    );
+    if (!unsigned.length) {
+      notify('Toutes ces pages sont déjà signées pour votre rôle.');
+      return;
+    }
+
+    if (signingSession && signingSession.signerUid === user.uid) {
+      try {
+        await executeSignJournals(signingSession, role, unsigned);
+      } catch (err) {
+        notify(
+          err instanceof Error
+            ? err.message
+            : 'Erreur lors de la signature de la page.',
+          'error'
+        );
+      }
+      return;
+    }
+
+    setSignModalState({
+      role,
+      targetLabel,
+      targetJournals: unsigned,
+    });
   };
 
   // Print helper
@@ -487,7 +771,7 @@ export default function App() {
     }, 60);
   };
 
-  // PDF Exports (with fallback to Account default folders!)
+  // Daily PDF export (owner only)
   const handleExportDayPdf = async () => {
     if (!currentChantier || !currentJournal) return;
     await flushPendingJournalSave();
@@ -524,8 +808,21 @@ export default function App() {
     }
   };
 
+  // Gated Weekly PDF export (both Controller and Temp Reader once ALL pages of finished week are signed by both)
   const handleExportWeekPdf = async (weekJournals: Journal[]) => {
     if (!currentChantier || !weekJournals.length) return;
+    const allCompleted = weekJournals.every((j) => j.status === 'completed');
+    const allSignedBoth = weekJournals.every(
+      (j) => Boolean(j.signatureControleur) && Boolean(j.signatureLecteur)
+    );
+    if (!allCompleted || !allSignedBoth) {
+      notify(
+        'Le PDF hebdomadaire est débloqué uniquement lorsque toutes les pages de la semaine terminée sont signées par le contrôleur et le lecteur.',
+        'error'
+      );
+      return;
+    }
+
     const sorted = [...weekJournals].sort(
       (a, b) =>
         (a.date || '').localeCompare(b.date || '') ||
@@ -536,7 +833,7 @@ export default function App() {
       setPdfProgress({
         current: 0,
         total: sorted.length,
-        label: 'Préparation de la semaine…',
+        label: 'Préparation du PDF signé (métadonnées incluses)…',
       });
       const res = await generateAndDeliverPdf(
         currentChantier,
@@ -549,8 +846,8 @@ export default function App() {
       setPdfProgress(null);
       notify(
         res.mode === 'folder'
-          ? `${filename} (${sorted.length} pages) enregistré dans « ${res.folderName} »`
-          : `${filename} (${sorted.length} pages) téléchargé`,
+          ? `${filename} (${sorted.length} pages + signatures) enregistré dans « ${res.folderName} »`
+          : `${filename} (${sorted.length} pages + signatures) téléchargé`,
         'success'
       );
     } catch (err) {
@@ -564,16 +861,17 @@ export default function App() {
     }
   };
 
-  // Full Cloud JSON Export / Import
+  // Full Cloud JSON Export / Import (owned dossiers only)
   const handleExportJson = async () => {
     if (!user) return;
+    const myChantiers = chantiers.filter((c) => c.ownerId === user.uid);
     try {
       const allJournals: Journal[] = [];
-      for (const ch of chantiers) {
-        const list = await fetchAllJournalsForChantier(ch, user.uid, isAdmin);
+      for (const ch of myChantiers) {
+        const list = await fetchAllJournalsForChantier(ch, user.uid);
         allJournals.push(...list);
       }
-      const payload: DB = { chantiers, journaux: allJournals };
+      const payload: DB = { chantiers: myChantiers, journaux: allJournals };
       const blob = new Blob([JSON.stringify(payload, null, 2)], {
         type: 'application/json',
       });
@@ -581,7 +879,7 @@ export default function App() {
       downloadBlob(blob, filename);
       setLastBackupIso(markBackupDone());
       notify(
-        `Archive exportée (${chantiers.length} chantier(s), ${allJournals.length} journal(aux)).`,
+        `Archive exportée (${myChantiers.length} chantier(s), ${allJournals.length} journal(aux)).`,
         'success'
       );
     } catch {
@@ -613,7 +911,7 @@ export default function App() {
     try {
       if (replaceAll) {
         for (const ch of chantiers) {
-          if (isAdmin || ch.ownerId === user.uid) {
+          if (ch.ownerId === user.uid) {
             await deleteChantierCloud(ch.id);
           }
         }
@@ -651,41 +949,77 @@ export default function App() {
       <AuthScreen
         unverifiedUser={user && !user.emailVerified ? user : null}
         onVerifiedRefresh={async () => {
-          if (!auth.currentUser) return;
+          if (!auth.currentUser) return false;
           await auth.currentUser.reload();
-          setUser({ ...auth.currentUser } as User);
           if (auth.currentUser.emailVerified) {
+            await auth.currentUser.getIdToken(true);
+            setUser(auth.currentUser);
+            setAuthTick((t) => t + 1);
             const prof = await ensureUserProfile(auth.currentUser);
             setProfile(prof);
+            return true;
           }
+          setUser(auth.currentUser);
+          setAuthTick((t) => t + 1);
+          return false;
         }}
       />
     );
   }
 
-  // Gate if deactivated by Admin
-  if (profile && !profile.active && !isAdminEmail(user.email)) {
+  // Gate if awaiting Administrator approval (or deactivated)
+  if (profile && !profile.active && !isAdmin) {
     return (
       <div className="min-h-screen bg-[#f4f6f9] flex items-center justify-center p-4">
         <div className="max-w-md w-full bg-white rounded-3xl border border-slate-200 shadow-lg p-6 text-center space-y-4">
-          <div className="w-12 h-12 rounded-2xl bg-red-50 text-red-600 flex items-center justify-center mx-auto">
-            <Ban className="w-6 h-6" />
+          <div className="w-12 h-12 rounded-2xl bg-amber-50 text-amber-700 flex items-center justify-center mx-auto">
+            <Clock className="w-6 h-6" />
           </div>
           <h2 className="text-lg font-bold text-slate-900">
-            Accès désactivé
+            Compte en attente d&apos;autorisation
           </h2>
-          <p className="text-sm text-slate-600">
-            Votre compte ({user.email}) a été suspendu par l&apos;administrateur
-            (F. Pirquin).
+          <p className="text-sm text-slate-600 leading-relaxed">
+            Votre adresse e-mail (<strong>{user.email}</strong>) est vérifiée.
+            Votre compte doit maintenant être autorisé par l&apos;administrateur
+            avant de pouvoir accéder aux dossiers.
           </p>
-          <button
-            type="button"
-            onClick={() => signOut(auth)}
-            className="min-h-[44px] px-5 rounded-xl bg-slate-900 text-white text-sm font-semibold cursor-pointer"
-          >
-            Se déconnecter
-          </button>
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-2.5 pt-1">
+            <button
+              type="button"
+              disabled={checkingActivation}
+              onClick={async () => {
+                setCheckingActivation(true);
+                try {
+                  const prof = await ensureUserProfile(user);
+                  setProfile(prof);
+                  if (prof.active) {
+                    notify('Votre compte est autorisé !', 'success');
+                  } else {
+                    notify('Toujours en attente d’autorisation.');
+                  }
+                } catch {
+                  notify('Impossible de vérifier le statut.', 'error');
+                } finally {
+                  setCheckingActivation(false);
+                }
+              }}
+              className="w-full sm:w-auto min-h-[44px] px-4 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white text-sm font-semibold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+            >
+              <RefreshCw
+                className={`w-4 h-4 ${checkingActivation ? 'animate-spin' : ''}`}
+              />
+              Actualiser le statut
+            </button>
+            <button
+              type="button"
+              onClick={() => signOut(auth)}
+              className="w-full sm:w-auto min-h-[44px] px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm font-semibold cursor-pointer"
+            >
+              Se déconnecter
+            </button>
+          </div>
         </div>
+        <Toast toast={toast} />
       </div>
     );
   }
@@ -725,11 +1059,8 @@ export default function App() {
                 <div className="text-sm sm:text-base font-extrabold tracking-tight leading-tight truncate">
                   Journal des travaux
                 </div>
-                <div className="text-[11px] text-white/80 truncate">
-                  INASEP · Signé{' '}
-                  <span className="font-bold text-[#d9d61f]">
-                    {APP_SIGNATURE}
-                  </span>
+                <div className="text-[11px] text-white/70 truncate">
+                  INASEP · {APP_SIGNATURE}
                 </div>
               </div>
             </button>
@@ -760,10 +1091,10 @@ export default function App() {
                 }}
                 className={`min-h-[38px] px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
                   view === 'compte'
-                    ? 'bg-[#d9d61f] text-slate-950'
+                    ? 'bg-white text-[#0a5b9c]'
                     : 'bg-white/10 hover:bg-white/20 text-white'
                 }`}
-                title="Mon compte, mot de passe, préférences et gestion des utilisateurs"
+                title="Mon compte, mot de passe et préférences"
               >
                 <UserCircle2 className="w-4 h-4 shrink-0" />
                 <span>Compte</span>
@@ -791,8 +1122,8 @@ export default function App() {
           {view === 'chantiers' && (
             <ChantiersView
               chantiers={chantiers}
+              shareByChantierId={shareByChantierId}
               currentUserId={user.uid}
-              isAdmin={isAdmin}
               lastBackupIso={lastBackupIso}
               localMigrationCount={unmigratedLocalCount}
               migratingLocal={migratingLocal}
@@ -811,6 +1142,7 @@ export default function App() {
                 setChantierModalOpen(true);
               }}
               onDeleteChantier={handleDeleteChantier}
+              onRedeemInvite={handleRedeemInvite}
               onExportJson={handleExportJson}
               onImportJsonFile={handleImportJsonFile}
             />
@@ -821,8 +1153,13 @@ export default function App() {
               chantier={currentChantier}
               allChantiers={chantiers}
               journals={chantierJournals}
+              shareInfo={shareByChantierId[currentChantier.id] || null}
               currentUserId={user.uid}
-              isAdmin={isAdmin}
+              signingSession={signingSession}
+              onResetSigningSession={() => {
+                setSigningSession(null);
+                notify('Session de vérification réinitialisée.');
+              }}
               onSelectChantier={(id) => {
                 setCurrentChantierId(id);
                 window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
@@ -835,6 +1172,7 @@ export default function App() {
                 setEditingChantier(currentChantier);
                 setChantierModalOpen(true);
               }}
+              onOpenShareAccess={() => setShareAccessModalOpen(true)}
               onShareHtml={() => {
                 const fn = exportShareableHTML(
                   currentChantier,
@@ -850,6 +1188,9 @@ export default function App() {
               }}
               onDuplicateJournal={handleDuplicateJournal}
               onDeleteJournal={handleDeleteJournal}
+              onSignJournals={(list, role, label) => {
+                void handleRequestSignJournals(list, role, label);
+              }}
               onPrintWeek={(wkJournals) =>
                 triggerPrint(currentChantier, wkJournals)
               }
@@ -862,9 +1203,21 @@ export default function App() {
               chantier={currentChantier}
               journal={currentJournal}
               previousJournal={previousJournal}
+              isOwner={currentChantier.ownerId === user.uid}
+              isInCompletedWeek={isCurrentJournalInCompletedWeek}
               firmSuggestions={firmSuggestions}
               travauxSuggestions={travauxSuggestions}
               onChange={handleUpdateJournal}
+              onToggleStatus={handleToggleJournalStatus}
+              onSignPage={(role) => {
+                void handleRequestSignJournals(
+                  [currentJournal],
+                  role,
+                  `Journal N° ${currentJournal.journalNum} (${fmtDateFR(
+                    currentJournal.date
+                  )})`
+                );
+              }}
               onBack={async () => {
                 await flushPendingJournalSave();
                 setView('chantier');
@@ -883,12 +1236,7 @@ export default function App() {
               user={user}
               profile={effectiveProfile}
               isAdmin={isAdmin}
-              chantiers={chantiers}
               onProfileUpdated={setProfile}
-              onEditChantier={(ch) => {
-                setEditingChantier(ch);
-                setChantierModalOpen(true);
-              }}
               onNotify={notify}
             />
           )}
@@ -896,8 +1244,7 @@ export default function App() {
 
         {/* Subtle Signed Footer */}
         <footer className="py-4 px-4 text-center text-xs text-slate-400">
-          Journal des travaux INASEP · Application signée{' '}
-          <span className="font-semibold text-slate-600">{APP_SIGNATURE}</span>
+          Journal des travaux INASEP · {APP_SIGNATURE}
         </footer>
       </div>
 
@@ -917,8 +1264,6 @@ export default function App() {
       <ChantierModal
         open={chantierModalOpen}
         editingChantier={editingChantier}
-        currentUserId={user.uid}
-        isAdmin={isAdmin}
         defaultPrepose={effectiveProfile.defaultPrepose}
         defaultHoraireDebut={effectiveProfile.defaultHoraireDebut}
         defaultHoraireFin={effectiveProfile.defaultHoraireFin}
@@ -929,6 +1274,40 @@ export default function App() {
         onSave={handleSaveChantier}
         onNotify={notify}
       />
+
+      {currentChantier && (
+        <ShareAccessModal
+          open={shareAccessModalOpen}
+          chantier={currentChantier}
+          user={user}
+          onClose={() => setShareAccessModalOpen(false)}
+          onNotify={notify}
+        />
+      )}
+
+      {signModalState && (
+        <SignatureModal
+          open={Boolean(signModalState)}
+          role={signModalState.role}
+          defaultSignerName={
+            effectiveProfile.defaultPrepose || effectiveProfile.displayName
+          }
+          signerEmail={user.email || ''}
+          signerUid={user.uid}
+          targetLabel={signModalState.targetLabel}
+          targetJournals={signModalState.targetJournals}
+          existingSession={signingSession}
+          onSessionVerified={setSigningSession}
+          onConfirmSign={async (session, journalsToSign) => {
+            await executeSignJournals(
+              session,
+              signModalState.role,
+              journalsToSign
+            );
+          }}
+          onClose={() => setSignModalState(null)}
+        />
+      )}
 
       <ConfirmModal
         open={Boolean(confirmState)}

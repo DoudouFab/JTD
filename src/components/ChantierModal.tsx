@@ -6,11 +6,9 @@ import {
   X,
   Check,
   AlertCircle,
-  Globe,
   Lock,
 } from 'lucide-react';
-import type { Chantier, UserProfile } from '../types';
-import { fetchAllUsersAdmin } from '../utils/firestoreService';
+import type { Chantier } from '../types';
 import {
   DEFAULT_DAY_FOLDER_KEY,
   DEFAULT_WEEK_FOLDER_KEY,
@@ -25,8 +23,6 @@ import { parseChantierXlsx } from '../utils/xlsxImport';
 interface ChantierModalProps {
   open: boolean;
   editingChantier: Chantier | null;
-  currentUserId: string;
-  isAdmin: boolean;
   defaultPrepose?: string;
   defaultHoraireDebut?: string;
   defaultHoraireFin?: string;
@@ -38,8 +34,6 @@ interface ChantierModalProps {
 export function ChantierModal({
   open,
   editingChantier,
-  currentUserId,
-  isAdmin,
   defaultPrepose = '',
   defaultHoraireDebut = '07:30',
   defaultHoraireFin = '16:30',
@@ -58,9 +52,6 @@ export function ChantierModal({
   const [horaireFin, setHoraireFin] = useState('16:30');
   const [preposeSurveillance, setPreposeSurveillance] = useState('');
   const [postes, setPostes] = useState<string[]>([]);
-  const [visibility, setVisibility] = useState<'team' | 'private'>('team');
-  const [memberIds, setMemberIds] = useState<string[]>([]);
-  const [teamUsers, setTeamUsers] = useState<UserProfile[]>([]);
 
   const [dayFolderName, setDayFolderName] = useState<string | null>(null);
   const [weekFolderName, setWeekFolderName] = useState<string | null>(null);
@@ -74,9 +65,6 @@ export function ChantierModal({
 
   const xlsxInputRef = useRef<HTMLInputElement | null>(null);
   const fsSupported = isFsAccessSupported();
-
-  const canManageVisibility =
-    !editingChantier || isAdmin || editingChantier.ownerId === currentUserId;
 
   useEffect(() => {
     if (!open) return;
@@ -95,17 +83,7 @@ export function ChantierModal({
       editingChantier ? editingChantier.preposeSurveillance : defaultPrepose
     );
     setPostes(editingChantier?.postes ? [...editingChantier.postes] : []);
-    setVisibility(editingChantier?.visibility === 'private' ? 'private' : 'team');
-    setMemberIds(editingChantier?.memberIds ? [...editingChantier.memberIds] : []);
     setErrorMsg(null);
-
-    if (isAdmin) {
-      fetchAllUsersAdmin()
-        .then(setTeamUsers)
-        .catch(() => setTeamUsers([]));
-    } else {
-      setTeamUsers([]);
-    }
 
     if (fsSupported) {
       getDirHandle(`dayFolder_${id}`).then((h) =>
@@ -130,7 +108,6 @@ export function ChantierModal({
     open,
     editingChantier,
     fsSupported,
-    isAdmin,
     defaultPrepose,
     defaultHoraireDebut,
     defaultHoraireFin,
@@ -196,14 +173,6 @@ export function ChantierModal({
     onNotify('Dossier dissocié.');
   };
 
-  const toggleMember = (userUid: string) => {
-    setMemberIds((prev) =>
-      prev.includes(userUid)
-        ? prev.filter((id) => id !== userUid)
-        : [...prev, userUid]
-    );
-  };
-
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!numero.trim() && !projet.trim()) {
@@ -215,8 +184,8 @@ export function ChantierModal({
       id: draftId,
       ownerId: editingChantier?.ownerId,
       ownerName: editingChantier?.ownerName,
-      visibility,
-      memberIds,
+      visibility: 'private',
+      readerIds: editingChantier?.readerIds || [],
       numero: numero.trim(),
       projet: projet.trim(),
       entrepriseNom: entrepriseNom.trim(),
@@ -319,105 +288,16 @@ export function ChantierModal({
             </div>
           )}
 
-          {/* Visibility / Multi-User Sharing */}
-          {canManageVisibility && (
-            <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 space-y-3">
-              <div className="text-xs font-bold uppercase tracking-wide text-slate-700">
-                Accès &amp; partage utilisateurs
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                <button
-                  type="button"
-                  onClick={() => setVisibility('team')}
-                  className={`min-h-[48px] p-3 rounded-xl border text-left flex items-start gap-2.5 cursor-pointer transition-colors ${
-                    visibility === 'team'
-                      ? 'bg-white border-[#0a5b9c] ring-2 ring-[#0a5b9c]/15'
-                      : 'bg-white border-slate-200 hover:bg-slate-50'
-                  }`}
-                >
-                  <Globe
-                    className={`w-4 h-4 mt-0.5 shrink-0 ${
-                      visibility === 'team'
-                        ? 'text-[#0a5b9c]'
-                        : 'text-slate-400'
-                    }`}
-                  />
-                  <div>
-                    <div className="text-xs font-bold text-slate-900">
-                      Équipe (partagé)
-                    </div>
-                    <div className="text-[11px] text-slate-500">
-                      Visible et saisissable par les utilisateurs connectés
-                    </div>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setVisibility('private')}
-                  className={`min-h-[48px] p-3 rounded-xl border text-left flex items-start gap-2.5 cursor-pointer transition-colors ${
-                    visibility === 'private'
-                      ? 'bg-white border-[#0a5b9c] ring-2 ring-[#0a5b9c]/15'
-                      : 'bg-white border-slate-200 hover:bg-slate-50'
-                  }`}
-                >
-                  <Lock
-                    className={`w-4 h-4 mt-0.5 shrink-0 ${
-                      visibility === 'private'
-                        ? 'text-amber-600'
-                        : 'text-slate-400'
-                    }`}
-                  />
-                  <div>
-                    <div className="text-xs font-bold text-slate-900">
-                      Privé / Restreint
-                    </div>
-                    <div className="text-[11px] text-slate-500">
-                      Uniquement moi, l&apos;admin et les membres choisis
-                    </div>
-                  </div>
-                </button>
-              </div>
-
-              {visibility === 'private' && isAdmin && teamUsers.length > 0 && (
-                <div className="pt-1 space-y-1.5">
-                  <div className="text-xs font-semibold text-slate-600">
-                    Autoriser certains utilisateurs :
-                  </div>
-                  <div className="max-h-36 overflow-y-auto rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
-                    {teamUsers
-                      .filter((u) => u.uid !== currentUserId)
-                      .map((u) => {
-                        const checked = memberIds.includes(u.uid);
-                        return (
-                          <label
-                            key={u.uid}
-                            className="flex items-center justify-between px-3 py-2 text-xs cursor-pointer hover:bg-slate-50"
-                          >
-                            <div className="min-w-0">
-                              <span className="font-semibold text-slate-900">
-                                {u.displayName}
-                              </span>
-                              {u.email && (
-                                <span className="text-slate-400 ml-1.5">
-                                  ({u.email})
-                                </span>
-                              )}
-                            </div>
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => toggleMember(u.uid)}
-                              className="w-4 h-4 accent-[#0a5b9c]"
-                            />
-                          </label>
-                        );
-                      })}
-                  </div>
-                </div>
-              )}
+          {/* Strict Private Isolation Notice */}
+          <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 flex items-start gap-2.5">
+            <Lock className="w-4 h-4 text-[#0a5b9c] shrink-0 mt-0.5" />
+            <div className="text-xs text-slate-600 leading-relaxed">
+              <strong className="text-slate-900">Chantier personnel (privé)</strong> :
+              vous seul pouvez rédiger et consulter ces journaux. Pour partager
+              temporairement ce dossier en lecture, utilisez{' '}
+              <strong>« Accès temporaire »</strong> sur la fiche du chantier.
             </div>
-          )}
+          </div>
 
           {/* Basic Info */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
