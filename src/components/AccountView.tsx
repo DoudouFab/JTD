@@ -7,25 +7,13 @@ import {
   type User,
 } from 'firebase/auth';
 import { useEffect, useState } from 'react';
-import {
-  Clock,
-  FolderOpen,
-  KeyRound,
-  Save,
-  Shield,
-  Trash2,
-  UserCheck,
-  UserPlus,
-  Users,
-  UserX,
-} from 'lucide-react';
+import { FolderOpen, KeyRound, Save, Smartphone, Trash2 } from 'lucide-react';
 import { auth } from '../firebase';
+import { usePWAInstall } from '../hooks/usePWAInstall';
 import type { UserProfile } from '../types';
+import { PWAInstallButton } from './PWAInstallButton';
 import {
-  createUserAccountAdmin,
-  deleteUserProfileAdmin,
-  fetchAllUsersAdmin,
-  updateUserAdmin,
+  fetchUserPreferencesOnce,
   updateUserPreferences,
 } from '../utils/firestoreService';
 import {
@@ -71,6 +59,7 @@ export function AccountView({
 
   // Default PDF folders
   const fsSupported = isFsAccessSupported();
+  const { isInstalled } = usePWAInstall();
   const [defaultDayFolderName, setDefaultDayFolderName] = useState<string | null>(
     null
   );
@@ -78,24 +67,26 @@ export function AccountView({
     string | null
   >(null);
 
-  // Sole Admin: Account authorization & management
-  const [users, setUsers] = useState<UserProfile[]>([]);
-  const [loadingUsers, setLoadingUsers] = useState(false);
-  const [newUserName, setNewUserName] = useState('');
-  const [newUserEmail, setNewUserEmail] = useState('');
-  const [newUserPwd, setNewUserPwd] = useState('');
-  const [creatingUser, setCreatingUser] = useState(false);
-
   const hasPasswordProvider = user.providerData.some(
     (p) => p.providerId === 'password'
   );
 
+  // Fetch user preferences once when opening the Account tab (0 reads at app startup)
   useEffect(() => {
-    setDisplayName(profile.displayName);
-    setDefaultPrepose(profile.defaultPrepose);
-    setDefaultHoraireDebut(profile.defaultHoraireDebut || '07:30');
-    setDefaultHoraireFin(profile.defaultHoraireFin || '16:30');
-  }, [profile]);
+    let active = true;
+    void fetchUserPreferencesOnce(user).then((loaded) => {
+      if (!active) return;
+      onProfileUpdated(loaded);
+      setDisplayName(loaded.displayName);
+      setDefaultPrepose(loaded.defaultPrepose);
+      setDefaultHoraireDebut(loaded.defaultHoraireDebut || '07:30');
+      setDefaultHoraireFin(loaded.defaultHoraireFin || '16:30');
+    });
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user.uid]);
 
   useEffect(() => {
     if (!fsSupported) return;
@@ -106,24 +97,6 @@ export function AccountView({
       setDefaultWeekFolderName(h ? h.name : null)
     );
   }, [fsSupported]);
-
-  const loadAdminUsers = async () => {
-    if (!isAdmin) return;
-    setLoadingUsers(true);
-    try {
-      const list = await fetchAllUsersAdmin();
-      setUsers(list);
-    } catch {
-      setUsers([]);
-    } finally {
-      setLoadingUsers(false);
-    }
-  };
-
-  useEffect(() => {
-    void loadAdminUsers();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAdmin]);
 
   const handleSavePreferences = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -143,8 +116,13 @@ export function AccountView({
         defaultHoraireFin: defaultHoraireFin || '16:30',
       });
       onNotify('Préférences du compte enregistrées.', 'success');
-    } catch {
-      onNotify('Erreur lors de la sauvegarde des préférences.', 'error');
+    } catch (err) {
+      onNotify(
+        err instanceof Error
+          ? err.message
+          : 'Erreur lors de la sauvegarde des préférences.',
+        'error'
+      );
     } finally {
       setSavingPrefs(false);
     }
@@ -226,89 +204,6 @@ export function AccountView({
     onNotify('Dossier par défaut dissocié.');
   };
 
-  const handleCreateUser = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newUserEmail.trim() || !newUserPwd) {
-      onNotify('Indiquez une adresse e-mail et un mot de passe initial.', 'error');
-      return;
-    }
-    if (newUserPwd.length < 6) {
-      onNotify(
-        'Le mot de passe initial doit contenir au moins 6 caractères.',
-        'error'
-      );
-      return;
-    }
-
-    setCreatingUser(true);
-    try {
-      const created = await createUserAccountAdmin({
-        displayName: newUserName.trim() || newUserEmail.split('@')[0],
-        email: newUserEmail.trim(),
-        password: newUserPwd,
-      });
-      setUsers((prev) =>
-        [...prev, created].sort((a, b) =>
-          a.displayName.localeCompare(b.displayName)
-        )
-      );
-      setNewUserName('');
-      setNewUserEmail('');
-      setNewUserPwd('');
-      onNotify(
-        `Compte créé et autorisé pour ${created.email} (e-mail de vérification envoyé).`,
-        'success'
-      );
-    } catch (err) {
-      const code = (err as { code?: string })?.code;
-      if (code === 'auth/email-already-in-use') {
-        onNotify('Cette adresse e-mail possède déjà un compte.', 'error');
-      } else if (code === 'auth/operation-not-allowed') {
-        onNotify(
-          'Activez « Adresse e-mail / Mot de passe » dans Firebase Console > Authentication.',
-          'error'
-        );
-      } else {
-        onNotify('Impossible de créer ce compte utilisateur.', 'error');
-      }
-    } finally {
-      setCreatingUser(false);
-    }
-  };
-
-  const handleToggleActive = async (target: UserProfile) => {
-    const nextActive = !target.active;
-    try {
-      await updateUserAdmin(target.uid, { active: nextActive });
-      setUsers((prev) =>
-        prev.map((u) =>
-          u.uid === target.uid ? { ...u, active: nextActive } : u
-        )
-      );
-      onNotify(
-        nextActive
-          ? `Accès autorisé pour ${target.displayName}.`
-          : `Accès suspendu pour ${target.displayName}.`,
-        nextActive ? 'success' : 'default'
-      );
-    } catch {
-      onNotify('Impossible de modifier le statut.', 'error');
-    }
-  };
-
-  const handleRemoveProfile = async (target: UserProfile) => {
-    try {
-      await deleteUserProfileAdmin(target.uid);
-      setUsers((prev) => prev.filter((u) => u.uid !== target.uid));
-      onNotify('Profil retiré de la liste.');
-    } catch {
-      onNotify('Impossible de supprimer ce profil.', 'error');
-    }
-  };
-
-  const pendingUsers = users.filter((u) => !u.active && u.uid !== user.uid);
-  const authorizedUsers = users.filter((u) => u.active || u.uid === user.uid);
-
   return (
     <div className="space-y-6 max-w-4xl mx-auto">
       {/* Header */}
@@ -318,7 +213,10 @@ export function AccountView({
             Mon compte
           </h1>
           <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-            {user.email} · {isAdmin ? 'Administrateur unique' : 'Utilisateur autorisé'}
+            {user.email} ·{' '}
+            {isAdmin
+              ? 'Administrateur (onglet Accès disponible dans la barre supérieure)'
+              : 'Compte autorisé'}
           </p>
         </div>
       </div>
@@ -574,190 +472,29 @@ export function AccountView({
         </div>
       </form>
 
-      {/* 4. Sous-section Admin unique : Autorisation & gestion des comptes */}
-      {isAdmin && (
-        <section className="rounded-2xl border border-slate-200 bg-white p-5 space-y-6">
-          <div className="flex items-center justify-between gap-2.5 border-b border-slate-100 pb-4">
-            <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-xl bg-[#0a5b9c]/10 text-[#0a5b9c] flex items-center justify-center shrink-0">
-                <Shield className="w-5 h-5" />
-              </div>
-              <div>
-                <h2 className="text-base font-bold text-slate-900">
-                  Gestion &amp; autorisation des comptes (Administrateur unique)
-                </h2>
-                <p className="text-xs text-slate-500">
-                  Vous êtes seul administrateur : autorisez ou suspendez
-                  l&apos;accès des utilisateurs. Chaque utilisateur gère ses
-                  propres chantiers en toute confidentialité.
-                </p>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => void loadAdminUsers()}
-              className="min-h-[38px] px-3 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700 cursor-pointer shrink-0"
-            >
-              Actualiser
-            </button>
+      {/* 4. Application installée & synchronisation multi-appareils */}
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 space-y-3">
+        <div className="flex items-start gap-3">
+          <div className="w-9 h-9 rounded-xl bg-[#0a5b9c]/10 text-[#0a5b9c] flex items-center justify-center shrink-0">
+            <Smartphone className="w-5 h-5" />
           </div>
-
-          {/* Pending Authorization Requests */}
-          {pendingUsers.length > 0 && (
-            <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-4 space-y-3">
-              <div className="text-xs font-bold uppercase tracking-wider text-amber-900 flex items-center gap-1.5">
-                <Clock className="w-4 h-4 text-amber-700" />
-                Comptes en attente d&apos;autorisation ({pendingUsers.length})
-              </div>
-              <div className="rounded-xl border border-amber-200 bg-white divide-y divide-amber-100 overflow-hidden">
-                {pendingUsers.map((u) => (
-                  <div
-                    key={u.uid}
-                    className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
-                  >
-                    <div className="min-w-0">
-                      <div className="text-sm font-bold text-slate-900 truncate">
-                        {u.displayName}
-                      </div>
-                      <div className="text-xs text-slate-500 truncate">
-                        {u.email || u.uid} · En attente d&apos;activation
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => handleToggleActive(u)}
-                        className="min-h-[38px] px-3.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
-                      >
-                        <UserCheck className="w-3.5 h-3.5" />
-                        Autoriser l&apos;accès
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveProfile(u)}
-                        className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg border border-slate-200 text-slate-400 hover:text-red-600 hover:border-red-200 cursor-pointer"
-                        title="Refuser / supprimer"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Create collaborator form */}
-          <form
-            onSubmit={handleCreateUser}
-            className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 space-y-3"
-          >
-            <div className="text-xs font-bold uppercase tracking-wide text-slate-700 flex items-center gap-1.5">
-              <UserPlus className="w-4 h-4 text-[#0a5b9c]" />
-              Créer et autoriser directement un utilisateur
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <input
-                type="text"
-                value={newUserName}
-                onChange={(e) => setNewUserName(e.target.value)}
-                placeholder="Nom complet"
-                className="min-h-[44px] px-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 focus:outline-none focus:border-[#0a5b9c]"
-              />
-              <input
-                type="email"
-                value={newUserEmail}
-                onChange={(e) => setNewUserEmail(e.target.value)}
-                placeholder="email@exemple.be"
-                className="min-h-[44px] px-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 focus:outline-none focus:border-[#0a5b9c]"
-              />
-              <input
-                type="password"
-                value={newUserPwd}
-                onChange={(e) => setNewUserPwd(e.target.value)}
-                placeholder="Mot de passe (min. 6)"
-                className="min-h-[44px] px-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 focus:outline-none focus:border-[#0a5b9c]"
-              />
-            </div>
-
-            <div className="flex justify-end">
-              <button
-                type="submit"
-                disabled={creatingUser}
-                className="min-h-[44px] px-4 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white text-sm font-semibold flex items-center gap-2 cursor-pointer disabled:opacity-60"
-              >
-                <UserPlus className="w-4 h-4" />
-                {creatingUser ? 'Création…' : 'Créer et autoriser'}
-              </button>
-            </div>
-          </form>
-
-          {/* Authorized users list */}
-          <div className="space-y-2.5">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
-              <Users className="w-4 h-4" />
-              Comptes autorisés ({authorizedUsers.length})
-            </h3>
-
-            {loadingUsers ? (
-              <div className="p-4 rounded-xl border border-slate-200 text-xs text-slate-500">
-                Chargement des comptes…
-              </div>
-            ) : authorizedUsers.length === 0 ? (
-              <div className="p-4 rounded-xl border border-slate-200 text-xs text-slate-500">
-                Aucun autre compte enregistré.
-              </div>
-            ) : (
-              <div className="rounded-xl border border-slate-200 divide-y divide-slate-100 overflow-hidden">
-                {authorizedUsers.map((u) => {
-                  const isSelf = u.uid === user.uid;
-                  return (
-                    <div
-                      key={u.uid}
-                      className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 bg-white"
-                    >
-                      <div className="min-w-0">
-                        <div className="text-sm font-bold text-slate-900 truncate">
-                          {u.displayName}
-                          {isSelf ? ' (moi — Admin)' : ''}
-                        </div>
-                        <div className="text-xs text-slate-500 truncate">
-                          {u.email || u.uid} ·{' '}
-                          {u.role === 'admin'
-                            ? 'Administrateur unique'
-                            : 'Utilisateur autorisé'}
-                        </div>
-                      </div>
-
-                      {!isSelf && (
-                        <div className="flex flex-wrap items-center gap-2 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => handleToggleActive(u)}
-                            className="min-h-[38px] px-3 rounded-lg border border-amber-200 text-amber-800 hover:bg-amber-50 text-xs font-semibold flex items-center gap-1 cursor-pointer"
-                          >
-                            <UserX className="w-3.5 h-3.5" />
-                            Suspendre
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveProfile(u)}
-                            className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg border border-slate-200 text-slate-400 hover:text-red-600 hover:border-red-200 cursor-pointer"
-                            title="Retirer le profil"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+          <div>
+            <h2 className="text-sm font-bold text-slate-900">
+              Application mobile &amp; raccourci « Mes JTD »
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">
+              {isInstalled
+                ? 'Mes JTD est installée sur cet appareil. Vos chantiers et journaux restent synchronisés sur toutes vos plateformes (PC, smartphone, tablette).'
+                : 'Installez Mes JTD sur votre téléphone ou ordinateur pour obtenir l’icône dédiée « Mes JTD » et retrouver vos derniers JTD à jour sur n’importe quel appareil.'}
+            </p>
           </div>
-        </section>
-      )}
+        </div>
+        {!isInstalled && (
+          <div className="pt-1">
+            <PWAInstallButton variant="card" />
+          </div>
+        )}
+      </section>
     </div>
   );
 }

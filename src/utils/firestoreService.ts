@@ -1,10 +1,4 @@
-import {
-  createUserWithEmailAndPassword,
-  sendEmailVerification,
-  signOut as firebaseSignOut,
-  updateProfile as updateAuthProfile,
-  type User,
-} from 'firebase/auth';
+import { updateProfile as updateAuthProfile, type User } from 'firebase/auth';
 import {
   arrayRemove,
   arrayUnion,
@@ -12,8 +6,9 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocFromServer,
   getDocs,
-  onSnapshot,
+  getDocsFromServer,
   query,
   serverTimestamp,
   setDoc,
@@ -21,33 +16,61 @@ import {
   updateDoc,
   where,
   writeBatch,
-  type Unsubscribe,
 } from 'firebase/firestore';
 import {
   auth,
   db,
-  getSecondaryAuth,
   handleFirestoreError,
   isAdminEmail,
+  isOfflineError,
+  isQuotaExceededError,
   OperationType,
 } from '../firebase';
 import type {
+  AccessStatus,
+  AccessUserRecord,
   Chantier,
   ChantierShare,
   DB,
   Journal,
   JournalStatus,
   PageSignatureRecord,
+  PreauthorizedEmail,
   ShareInvite,
   UserProfile,
 } from '../types';
 import { uid } from './storage';
+
+// ---------------------------------------------------------------------------
+// Normalization & Device Detection Helpers
+// ---------------------------------------------------------------------------
 
 export function sanitizeDocId(raw?: string): string {
   const cleaned = String(raw || '')
     .replace(/[^a-zA-Z0-9_-]/g, '-')
     .slice(0, 120);
   return cleaned || uid();
+}
+
+export function normalizeEmailId(email: string): string {
+  return email
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '_');
+}
+
+export function detectDeviceHint(): string {
+  if (typeof navigator === 'undefined') return 'Appareil web';
+  const ua = navigator.userAgent || '';
+  if (/iPhone/i.test(ua)) return 'iPhone';
+  if (/iPad/i.test(ua)) return 'iPad';
+  if (/Android/i.test(ua)) {
+    return /Mobile/i.test(ua) ? 'Smartphone Android' : 'Tablette Android';
+  }
+  if (/Macintosh|Mac OS X/i.test(ua)) return 'Mac';
+  if (/Windows/i.test(ua)) return 'PC Windows';
+  if (/Linux/i.test(ua)) return 'PC Linux';
+  return 'Navigateur web';
 }
 
 function clampStr(val: unknown, max: number): string {
@@ -62,6 +85,625 @@ function clampStrList(
   if (!Array.isArray(val)) return [];
   return val.slice(0, maxItems).map((item) => clampStr(item, maxItemLen));
 }
+
+// ---------------------------------------------------------------------------
+// Offline Cache Helpers (localStorage — 0 Firestore reads on cached reload)
+// ---------------------------------------------------------------------------
+
+const ACCESS_CACHE_PREFIX = 'jt_access_approved_v1_';
+const CHANTIERS_CACHE_PREFIX = 'jt_chantiers_cache_v1_';
+const JOURNALS_CACHE_PREFIX = 'jt_journals_cache_v1_';
+
+export function getCachedDeviceApproval(uidKey: string): AccessUserRecord | null {
+  try {
+    const raw = localStorage.getItem(`${ACCESS_CACHE_PREFIX}${uidKey}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as AccessUserRecord;
+    return parsed?.status === 'approved' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setCachedDeviceApproval(
+  uidKey: string,
+  record: AccessUserRecord | null
+): void {
+  try {
+    const key = `${ACCESS_CACHE_PREFIX}${uidKey}`;
+    if (!record || record.status !== 'approved') {
+      localStorage.removeItem(key);
+    } else {
+      localStorage.setItem(key, JSON.stringify(record));
+    }
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+export function getCachedChantiersBundle(userId: string): {
+  chantiers: Chantier[];
+  shareByChantierId: Record<string, ChantierShare>;
+} | null {
+  try {
+    const raw = localStorage.getItem(`${CHANTIERS_CACHE_PREFIX}${userId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as {
+      chantiers?: Chantier[];
+      shareByChantierId?: Record<string, ChantierShare>;
+    };
+    if (!Array.isArray(parsed.chantiers)) return null;
+    return {
+      chantiers: parsed.chantiers,
+      shareByChantierId: parsed.shareByChantierId || {},
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function setCachedChantiersBundle(
+  userId: string,
+  payload: {
+    chantiers: Chantier[];
+    shareByChantierId: Record<string, ChantierShare>;
+  }
+): void {
+  try {
+    localStorage.setItem(
+      `${CHANTIERS_CACHE_PREFIX}${userId}`,
+      JSON.stringify(payload)
+    );
+  } catch {
+    // ignore
+  }
+}
+
+export function getCachedJournals(chantierId: string): Journal[] | null {
+  try {
+    const raw = localStorage.getItem(`${JOURNALS_CACHE_PREFIX}${chantierId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Journal[];
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setCachedJournals(chantierId: string, journals: Journal[]): void {
+  try {
+    localStorage.setItem(
+      `${JOURNALS_CACHE_PREFIX}${chantierId}`,
+      JSON.stringify(journals)
+    );
+  } catch {
+    // ignore
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Colleague Access Control (1 getDocFromServer read at startup for non-admin)
+// ---------------------------------------------------------------------------
+
+export type StartupAccessResult =
+  | { state: 'approved'; record: AccessUserRecord; offline?: boolean }
+  | { state: 'pending'; record: AccessUserRecord }
+  | { state: 'revoked'; record: AccessUserRecord }
+  | { state: 'needs_code'; record: null }
+  | { state: 'offline_unapproved'; record: null }
+  | { state: 'quota_exceeded'; record: null; errorMessage: string };
+
+function mapAccessUserDoc(
+  data: Record<string, unknown>,
+  fallbackUid: string
+): AccessUserRecord {
+  const statusRaw = String(data.status || 'pending');
+  const status: AccessStatus =
+    statusRaw === 'approved' || statusRaw === 'revoked' ? statusRaw : 'pending';
+  return {
+    uid: String(data.uid || fallbackUid),
+    email: String(data.email || ''),
+    displayName: String(data.displayName || 'Utilisateur'),
+    role: data.role === 'admin' ? 'admin' : 'user',
+    status,
+    deviceHint: String(data.deviceHint || ''),
+    note: String(data.note || ''),
+    activationCode: String(data.activationCode || ''),
+    createdAtMs: (data.createdAt as { toMillis?: () => number })?.toMillis?.(),
+    updatedAtMs: (data.updatedAt as { toMillis?: () => number })?.toMillis?.(),
+  };
+}
+
+export async function checkUserAccessStartup(
+  user: User
+): Promise<StartupAccessResult> {
+  const accessRef = doc(db, 'access_users', user.uid);
+  const currentDevice = detectDeviceHint();
+  const currentName =
+    user.displayName?.trim() || user.email?.split('@')[0] || 'Utilisateur';
+  const currentEmail = (user.email || '').trim().toLowerCase();
+
+  try {
+    const snap = await getDocFromServer(accessRef);
+    if (!snap.exists()) {
+      setCachedDeviceApproval(user.uid, null);
+      return { state: 'needs_code', record: null };
+    }
+
+    const record = mapAccessUserDoc(snap.data(), user.uid);
+
+    if (record.status === 'revoked') {
+      setCachedDeviceApproval(user.uid, null);
+      return { state: 'revoked', record };
+    }
+
+    if (record.status === 'pending') {
+      setCachedDeviceApproval(user.uid, null);
+      return { state: 'pending', record };
+    }
+
+    // Approved! Save offline approval in localStorage.
+    // Only write to Firestore if displayName / deviceHint / email actually changed!
+    const changedFields: Record<string, unknown> = {};
+    if (currentName && record.displayName !== currentName) {
+      changedFields.displayName = clampStr(currentName, 120);
+    }
+    if (currentDevice && record.deviceHint !== currentDevice) {
+      changedFields.deviceHint = clampStr(currentDevice, 120);
+    }
+    if (currentEmail && record.email.toLowerCase() !== currentEmail) {
+      changedFields.email = clampStr(currentEmail, 200);
+    }
+
+    let finalRecord = record;
+    if (Object.keys(changedFields).length > 0) {
+      try {
+        await updateDoc(accessRef, {
+          ...changedFields,
+          updatedAt: serverTimestamp(),
+        });
+        finalRecord = {
+          ...record,
+          displayName: String(changedFields.displayName || record.displayName),
+          deviceHint: String(changedFields.deviceHint || record.deviceHint),
+          email: String(changedFields.email || record.email),
+        };
+      } catch {
+        // Non-fatal if metadata sync fails
+      }
+    }
+
+    setCachedDeviceApproval(user.uid, finalRecord);
+    return { state: 'approved', record: finalRecord };
+  } catch (err) {
+    if (isQuotaExceededError(err)) {
+      const cached = getCachedDeviceApproval(user.uid);
+      if (cached) {
+        return { state: 'approved', record: cached, offline: true };
+      }
+      return {
+        state: 'quota_exceeded',
+        record: null,
+        errorMessage:
+          'Quota gratuit quotidien Firestore dépassé. Il se réinitialisera automatiquement demain.',
+      };
+    }
+
+    if (isOfflineError(err) || (typeof navigator !== 'undefined' && !navigator.onLine)) {
+      const cached = getCachedDeviceApproval(user.uid);
+      if (cached) {
+        return { state: 'approved', record: cached, offline: true };
+      }
+      return { state: 'offline_unapproved', record: null };
+    }
+
+    // Fallback offline check for unexpected transient error when device was already approved
+    const cached = getCachedDeviceApproval(user.uid);
+    if (cached && typeof navigator !== 'undefined' && !navigator.onLine) {
+      return { state: 'approved', record: cached, offline: true };
+    }
+    throw err;
+  }
+}
+
+export async function activateWithPersonalCode(
+  user: User,
+  rawCode: string
+): Promise<AccessUserRecord> {
+  const code = rawCode.trim();
+  if (code.length < 3 || code.length > 32) {
+    throw new Error(
+      'Le code personnel doit contenir entre 3 et 32 caractères.'
+    );
+  }
+  const email = (user.email || '').trim().toLowerCase();
+  if (!email) {
+    throw new Error('Adresse e-mail introuvable sur ce compte.');
+  }
+
+  const emailId = normalizeEmailId(email);
+  const preauthRef = doc(db, 'preauthorized_emails', emailId);
+
+  let preauthNote = '';
+  try {
+    const preSnap = await getDocFromServer(preauthRef);
+    if (!preSnap.exists()) {
+      throw new Error(
+        `Aucun code personnel n'est configuré pour ${email}. Demandez l'accès ci-dessous ou contactez l'administrateur.`
+      );
+    }
+    const preData = preSnap.data();
+    const expectedCode = String(preData.accessCode || '').trim();
+    if (expectedCode.toLowerCase() !== code.toLowerCase()) {
+      throw new Error('Code personnel incorrect pour cette adresse e-mail.');
+    }
+    preauthNote = String(preData.note || '');
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('Firestore Error')) {
+      if (isQuotaExceededError(err)) {
+        throw new Error(
+          'Quota gratuit quotidien Firestore dépassé. Le quota se réinitialisera demain.'
+        );
+      }
+      if (isOfflineError(err)) {
+        throw new Error(
+          'Connexion Internet requise pour valider votre code personnel.'
+        );
+      }
+      throw err;
+    }
+    throw err;
+  }
+
+  const displayName = clampStr(
+    user.displayName?.trim() || email.split('@')[0] || 'Utilisateur',
+    120
+  );
+  const deviceHint = clampStr(detectDeviceHint(), 120);
+  const accessRef = doc(db, 'access_users', user.uid);
+
+  try {
+    const existingSnap = await getDocFromServer(accessRef);
+    if (!existingSnap.exists()) {
+      await setDoc(accessRef, {
+        uid: user.uid,
+        email: clampStr(email, 200),
+        displayName,
+        role: 'user',
+        status: 'approved',
+        deviceHint,
+        note: clampStr(preauthNote, 250),
+        activationCode: clampStr(code, 32),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      const existingData = existingSnap.data();
+      if (existingData.status === 'revoked') {
+        throw new Error("Votre accès sur cet appareil a été révoqué par l'administrateur.");
+      }
+      await updateDoc(accessRef, {
+        status: 'approved',
+        activationCode: clampStr(code, 32),
+        displayName,
+        deviceHint,
+        note: clampStr(preauthNote, 250),
+        email: clampStr(email, 200),
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.includes("révoqué par l'administrateur")
+    ) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.WRITE, `access_users/${user.uid}`);
+  }
+
+  const approvedRecord: AccessUserRecord = {
+    uid: user.uid,
+    email,
+    displayName,
+    role: 'user',
+    status: 'approved',
+    deviceHint,
+    note: preauthNote,
+    activationCode: code,
+  };
+  setCachedDeviceApproval(user.uid, approvedRecord);
+  return approvedRecord;
+}
+
+export async function requestAccessWithoutCode(
+  user: User
+): Promise<AccessUserRecord> {
+  const email = clampStr((user.email || '').trim().toLowerCase(), 200);
+  const displayName = clampStr(
+    user.displayName?.trim() || email.split('@')[0] || 'Utilisateur',
+    120
+  );
+  const deviceHint = clampStr(detectDeviceHint(), 120);
+  const accessRef = doc(db, 'access_users', user.uid);
+
+  try {
+    const existingSnap = await getDocFromServer(accessRef);
+    if (!existingSnap.exists()) {
+      await setDoc(accessRef, {
+        uid: user.uid,
+        email,
+        displayName,
+        role: 'user',
+        status: 'pending',
+        deviceHint,
+        note: '',
+        activationCode: '',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `access_users/${user.uid}`);
+  }
+
+  return {
+    uid: user.uid,
+    email,
+    displayName,
+    role: 'user',
+    status: 'pending',
+    deviceHint,
+    note: '',
+    activationCode: '',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Admin-Only On-Demand Access Management (0 reads until "Accès" tab opened)
+// ---------------------------------------------------------------------------
+
+export async function fetchAdminAccessData(): Promise<{
+  preauthorized: PreauthorizedEmail[];
+  accessUsers: AccessUserRecord[];
+}> {
+  try {
+    const [preSnap, usersSnap] = await Promise.all([
+      getDocsFromServer(collection(db, 'preauthorized_emails')),
+      getDocsFromServer(collection(db, 'access_users')),
+    ]);
+
+    const preauthorized: PreauthorizedEmail[] = preSnap.docs
+      .map((d) => {
+        const raw = d.data();
+        return {
+          id: String(raw.id || d.id),
+          email: String(raw.email || ''),
+          accessCode: String(raw.accessCode || ''),
+          note: String(raw.note || ''),
+          createdBy: String(raw.createdBy || ''),
+          createdAtMs: raw.createdAt?.toMillis?.(),
+        };
+      })
+      .sort((a, b) => a.email.localeCompare(b.email));
+
+    const accessUsers: AccessUserRecord[] = usersSnap.docs
+      .map((d) => mapAccessUserDoc(d.data(), d.id))
+      .sort((a, b) => a.email.localeCompare(b.email));
+
+    return { preauthorized, accessUsers };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'preauthorized_emails');
+  }
+}
+
+export async function savePreauthorizedEmailAdmin(params: {
+  email: string;
+  accessCode: string;
+  note: string;
+  adminEmail: string;
+  existingAccessUsers: AccessUserRecord[];
+}): Promise<PreauthorizedEmail> {
+  const cleanEmail = params.email.trim().toLowerCase();
+  const cleanCode = params.accessCode.trim();
+  const cleanNote = params.note.trim();
+
+  if (!cleanEmail || !cleanEmail.includes('@')) {
+    throw new Error('Adresse e-mail invalide.');
+  }
+  if (cleanCode.length < 3 || cleanCode.length > 32) {
+    throw new Error(
+      'Le code personnel doit comporter entre 3 et 32 caractères.'
+    );
+  }
+
+  const emailId = normalizeEmailId(cleanEmail);
+  const preRef = doc(db, 'preauthorized_emails', emailId);
+
+  try {
+    const existingPre = await getDocFromServer(preRef);
+    if (!existingPre.exists()) {
+      await setDoc(preRef, {
+        id: emailId,
+        email: clampStr(cleanEmail, 200),
+        accessCode: clampStr(cleanCode, 32),
+        note: clampStr(cleanNote, 250),
+        createdBy: clampStr(params.adminEmail, 200),
+        createdAt: serverTimestamp(),
+      });
+    } else {
+      await updateDoc(preRef, {
+        accessCode: clampStr(cleanCode, 32),
+        note: clampStr(cleanNote, 250),
+      });
+    }
+
+    // Automatically promote matching pending/revoked access_users records to approved
+    const matchingDevices = params.existingAccessUsers.filter(
+      (u) =>
+        u.email.trim().toLowerCase() === cleanEmail &&
+        (u.status === 'pending' || u.status === 'revoked')
+    );
+    for (const dev of matchingDevices) {
+      await updateDoc(doc(db, 'access_users', dev.uid), {
+        status: 'approved',
+        activationCode: clampStr(cleanCode, 32),
+        note: clampStr(cleanNote || dev.note, 250),
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    return {
+      id: emailId,
+      email: cleanEmail,
+      accessCode: cleanCode,
+      note: cleanNote,
+      createdBy: params.adminEmail,
+    };
+  } catch (error) {
+    handleFirestoreError(
+      error,
+      OperationType.WRITE,
+      `preauthorized_emails/${emailId}`
+    );
+  }
+}
+
+export async function deletePreauthorizedAndDevicesAdmin(
+  emailId: string,
+  email: string,
+  existingAccessUsers: AccessUserRecord[]
+): Promise<string[]> {
+  const cleanEmail = email.trim().toLowerCase();
+  const removedUids: string[] = [];
+  try {
+    await deleteDoc(doc(db, 'preauthorized_emails', emailId));
+    const matching = existingAccessUsers.filter(
+      (u) => u.email.trim().toLowerCase() === cleanEmail
+    );
+    for (const dev of matching) {
+      await deleteDoc(doc(db, 'access_users', dev.uid));
+      removedUids.push(dev.uid);
+    }
+    return removedUids;
+  } catch (error) {
+    handleFirestoreError(
+      error,
+      OperationType.DELETE,
+      `preauthorized_emails/${emailId}`
+    );
+  }
+}
+
+export async function updateAccessUserStatusAdmin(
+  userId: string,
+  status: AccessStatus
+): Promise<void> {
+  try {
+    await updateDoc(doc(db, 'access_users', userId), {
+      status,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `access_users/${userId}`);
+  }
+}
+
+export async function deleteAccessUserAdmin(userId: string): Promise<void> {
+  try {
+    await deleteDoc(doc(db, 'access_users', userId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `access_users/${userId}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// User Preferences Profile (loaded on demand in Compte, or local default)
+// ---------------------------------------------------------------------------
+
+export function buildLocalDefaultProfile(user: User): UserProfile {
+  const isSoleAdmin = isAdminEmail(user.email);
+  return {
+    uid: user.uid,
+    displayName:
+      user.displayName?.trim() ||
+      (isSoleAdmin ? 'Fabien Pirquin' : user.email?.split('@')[0]) ||
+      'Utilisateur INASEP',
+    email: user.email || undefined,
+    role: isSoleAdmin ? 'admin' : 'user',
+    active: true,
+    defaultPrepose: isSoleAdmin ? 'F. Pirquin' : '',
+    defaultHoraireDebut: '07:30',
+    defaultHoraireFin: '16:30',
+  };
+}
+
+export async function fetchUserPreferencesOnce(user: User): Promise<UserProfile> {
+  const fallback = buildLocalDefaultProfile(user);
+  try {
+    const snap = await getDoc(doc(db, 'users', user.uid));
+    if (!snap.exists()) return fallback;
+    const data = snap.data();
+    return {
+      ...fallback,
+      displayName: String(data.displayName || fallback.displayName),
+      defaultPrepose: String(data.defaultPrepose ?? fallback.defaultPrepose),
+      defaultHoraireDebut: String(data.defaultHoraireDebut ?? '07:30'),
+      defaultHoraireFin: String(data.defaultHoraireFin ?? '16:30'),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+export async function updateUserPreferences(
+  userId: string,
+  patch: {
+    displayName: string;
+    defaultPrepose: string;
+    defaultHoraireDebut: string;
+    defaultHoraireFin: string;
+  }
+): Promise<void> {
+  const userRef = doc(db, 'users', userId);
+  const currentUser = auth.currentUser;
+  const isSoleAdmin = isAdminEmail(currentUser?.email);
+  try {
+    if (currentUser && currentUser.uid === userId) {
+      await updateAuthProfile(currentUser, {
+        displayName: clampStr(patch.displayName.trim(), 120),
+      });
+    }
+    const snap = await getDoc(userRef);
+    if (!snap.exists()) {
+      await setDoc(userRef, {
+        uid: userId,
+        displayName: clampStr(patch.displayName.trim() || 'Utilisateur', 120),
+        role: isSoleAdmin ? 'admin' : 'user',
+        active: true,
+        defaultPrepose: clampStr(patch.defaultPrepose.trim(), 150),
+        defaultHoraireDebut: clampStr(patch.defaultHoraireDebut || '07:30', 20),
+        defaultHoraireFin: clampStr(patch.defaultHoraireFin || '16:30', 20),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await updateDoc(userRef, {
+        displayName: clampStr(patch.displayName.trim() || 'Utilisateur', 120),
+        defaultPrepose: clampStr(patch.defaultPrepose.trim(), 150),
+        defaultHoraireDebut: clampStr(patch.defaultHoraireDebut || '07:30', 20),
+        defaultHoraireFin: clampStr(patch.defaultHoraireFin || '16:30', 20),
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `users/${userId}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Chantiers & Journaux (One-Shot Fetches + Local Offline Cache, NO onSnapshot)
+// ---------------------------------------------------------------------------
 
 function sanitizeChantierPayload(
   ch: Chantier,
@@ -160,353 +802,129 @@ function sanitizeJournalPayload(
   };
 }
 
-export async function ensureUserProfile(user: User): Promise<UserProfile> {
-  const userRef = doc(db, 'users', user.uid);
-  const privRef = doc(db, 'users', user.uid, 'private', 'info');
-  const isSoleAdmin = isAdminEmail(user.email);
-  const defaultName =
-    user.displayName?.trim() ||
-    (isSoleAdmin ? 'Fabien Pirquin' : user.email?.split('@')[0]) ||
-    'Utilisateur INASEP';
-  const expectedRole: 'admin' | 'user' = isSoleAdmin ? 'admin' : 'user';
-  const defaultPreposeInit = isSoleAdmin ? 'F. Pirquin' : '';
-
+export async function fetchChantiersAndSharesOnce(userId: string): Promise<{
+  chantiers: Chantier[];
+  shareByChantierId: Record<string, ChantierShare>;
+  fromCache?: boolean;
+}> {
   try {
-    const snap = await getDoc(userRef);
-    let profile: UserProfile = {
-      uid: user.uid,
-      displayName: defaultName,
-      email: user.email || undefined,
-      role: expectedRole,
-      active: isSoleAdmin, // Self-registered users wait for Admin approval
-      defaultPrepose: defaultPreposeInit,
-      defaultHoraireDebut: '07:30',
-      defaultHoraireFin: '16:30',
-    };
+    const [ownedSnap, sharesSnap] = await Promise.all([
+      getDocsFromServer(
+        query(collection(db, 'chantiers'), where('ownerId', '==', userId))
+      ),
+      getDocsFromServer(
+        query(
+          collection(db, 'chantierShares'),
+          where('readerUid', '==', userId)
+        )
+      ),
+    ]);
 
-    if (!snap.exists()) {
-      await setDoc(userRef, {
-        uid: user.uid,
-        displayName: clampStr(defaultName, 120),
-        role: expectedRole,
-        active: isSoleAdmin,
-        defaultPrepose: clampStr(defaultPreposeInit, 150),
-        defaultHoraireDebut: '07:30',
-        defaultHoraireFin: '16:30',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    } else {
-      const data = snap.data();
-      profile = {
-        uid: user.uid,
-        displayName: String(data.displayName || defaultName),
-        email: user.email || undefined,
-        role: isSoleAdmin ? 'admin' : 'user',
-        active: isSoleAdmin
-          ? true
-          : typeof data.active === 'boolean'
-            ? data.active
-            : false,
-        defaultPrepose: String(data.defaultPrepose ?? defaultPreposeInit),
-        defaultHoraireDebut: String(data.defaultHoraireDebut ?? '07:30'),
-        defaultHoraireFin: String(data.defaultHoraireFin ?? '16:30'),
-      };
-    }
-
-    if (user.email) {
-      const privSnap = await getDoc(privRef);
-      if (!privSnap.exists()) {
-        await setDoc(privRef, {
-          email: clampStr(user.email, 200),
-          updatedAt: serverTimestamp(),
-        });
-      } else if (privSnap.data().email !== user.email) {
-        await updateDoc(privRef, {
-          email: clampStr(user.email, 200),
-          updatedAt: serverTimestamp(),
-        });
-      }
-    }
-
-    return profile;
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}`);
-  }
-}
-
-export async function updateUserPreferences(
-  userId: string,
-  patch: {
-    displayName: string;
-    defaultPrepose: string;
-    defaultHoraireDebut: string;
-    defaultHoraireFin: string;
-  }
-): Promise<void> {
-  const userRef = doc(db, 'users', userId);
-  try {
-    if (auth.currentUser && auth.currentUser.uid === userId) {
-      await updateAuthProfile(auth.currentUser, {
-        displayName: clampStr(patch.displayName.trim(), 120),
-      });
-    }
-    await updateDoc(userRef, {
-      displayName: clampStr(patch.displayName.trim() || 'Utilisateur', 120),
-      defaultPrepose: clampStr(patch.defaultPrepose.trim(), 150),
-      defaultHoraireDebut: clampStr(patch.defaultHoraireDebut || '07:30', 20),
-      defaultHoraireFin: clampStr(patch.defaultHoraireFin || '16:30', 20),
-      updatedAt: serverTimestamp(),
-    });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, `users/${userId}`);
-  }
-}
-
-export async function createUserAccountAdmin(params: {
-  displayName: string;
-  email: string;
-  password: string;
-  defaultPrepose?: string;
-}): Promise<UserProfile> {
-  const secondaryAuth = getSecondaryAuth();
-  const cleanEmail = params.email.trim();
-  const cleanName = params.displayName.trim() || cleanEmail.split('@')[0];
-
-  const cred = await createUserWithEmailAndPassword(
-    secondaryAuth,
-    cleanEmail,
-    params.password
-  );
-  await updateAuthProfile(cred.user, { displayName: cleanName });
-  try {
-    await sendEmailVerification(cred.user);
-  } catch {
-    // non-fatal if mail throttle occurs
-  }
-  const newUid = cred.user.uid;
-  await firebaseSignOut(secondaryAuth);
-
-  // Admin writes the pre-approved user profile using primary Admin Firestore session
-  try {
-    await setDoc(doc(db, 'users', newUid), {
-      uid: newUid,
-      displayName: clampStr(cleanName, 120),
-      role: 'user',
-      active: true,
-      defaultPrepose: clampStr(params.defaultPrepose || cleanName, 150),
-      defaultHoraireDebut: '07:30',
-      defaultHoraireFin: '16:30',
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-    await setDoc(doc(db, 'users', newUid, 'private', 'info'), {
-      email: clampStr(cleanEmail, 200),
-      updatedAt: serverTimestamp(),
-    });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, `users/${newUid}`);
-  }
-
-  return {
-    uid: newUid,
-    displayName: cleanName,
-    email: cleanEmail,
-    role: 'user',
-    active: true,
-    defaultPrepose: params.defaultPrepose || cleanName,
-    defaultHoraireDebut: '07:30',
-    defaultHoraireFin: '16:30',
-  };
-}
-
-export async function updateUserAdmin(
-  userId: string,
-  patch: { active: boolean }
-): Promise<void> {
-  try {
-    await updateDoc(doc(db, 'users', userId), {
-      active: patch.active,
-      updatedAt: serverTimestamp(),
-    });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, `users/${userId}`);
-  }
-}
-
-export async function deleteUserProfileAdmin(userId: string): Promise<void> {
-  try {
-    await deleteDoc(doc(db, 'users', userId, 'private', 'info'));
-    await deleteDoc(doc(db, 'users', userId));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, `users/${userId}`);
-  }
-}
-
-export function subscribeChantiers(
-  userId: string,
-  onData: (payload: {
-    chantiers: Chantier[];
-    shareByChantierId: Record<string, ChantierShare>;
-  }) => void,
-  onError?: (err: Error) => void
-): Unsubscribe {
-  const ownedMap = new Map<string, Chantier>();
-  const sharedMap = new Map<string, Chantier>();
-  const shareByChantierId = new Map<string, ChantierShare>();
-  const sharedDocUnsubs = new Map<string, Unsubscribe>();
-
-  const emit = () => {
     const merged = new Map<string, Chantier>();
-    ownedMap.forEach((v, k) => merged.set(k, v));
-    sharedMap.forEach((v, k) => {
-      if (!merged.has(k)) merged.set(k, v);
+    ownedSnap.docs.forEach((d) => merged.set(d.id, d.data() as Chantier));
+
+    const now = Date.now();
+    const shareByChantierId: Record<string, ChantierShare> = {};
+    const activeSharedIds: string[] = [];
+
+    sharesSnap.docs.forEach((d) => {
+      const raw = d.data();
+      const expiresAtMs = raw.expiresAt?.toMillis?.() ?? 0;
+      if (raw.revoked === false && expiresAtMs > now) {
+        const share: ChantierShare = {
+          id: String(raw.id || d.id),
+          chantierId: String(raw.chantierId),
+          chantierOwnerId: String(raw.chantierOwnerId),
+          inviteCode: String(raw.inviteCode),
+          readerUid: String(raw.readerUid),
+          readerName: String(raw.readerName || ''),
+          label: String(raw.label || ''),
+          revoked: false,
+          expiresAtMs,
+        };
+        shareByChantierId[share.chantierId] = share;
+        if (!merged.has(share.chantierId)) {
+          activeSharedIds.push(share.chantierId);
+        }
+      }
     });
-    const list = Array.from(merged.values()).sort((a, b) =>
+
+    if (activeSharedIds.length > 0) {
+      await Promise.all(
+        activeSharedIds.map(async (cId) => {
+          try {
+            const chSnap = await getDocFromServer(doc(db, 'chantiers', cId));
+            if (chSnap.exists()) {
+              merged.set(cId, chSnap.data() as Chantier);
+            }
+          } catch {
+            // ignore expired or inaccessible individual shares
+          }
+        })
+      );
+    }
+
+    const chantiers = Array.from(merged.values()).sort((a, b) =>
       (a.numero || a.projet || '').localeCompare(b.numero || b.projet || '')
     );
-    const shareObj: Record<string, ChantierShare> = {};
-    shareByChantierId.forEach((v, k) => {
-      shareObj[k] = v;
-    });
-    onData({ chantiers: list, shareByChantierId: shareObj });
-  };
 
-  // 1. User's strictly private owned chantiers
-  const unsubOwned = onSnapshot(
-    query(collection(db, 'chantiers'), where('ownerId', '==', userId)),
-    (snap) => {
-      ownedMap.clear();
-      snap.docs.forEach((d) => ownedMap.set(d.id, d.data() as Chantier));
-      emit();
-    },
-    (error) => {
-      try {
-        handleFirestoreError(error, OperationType.LIST, 'chantiers(owned)');
-      } catch (wrapped) {
-        onError?.(wrapped as Error);
+    const bundle = { chantiers, shareByChantierId };
+    setCachedChantiersBundle(userId, bundle);
+    return bundle;
+  } catch (error) {
+    if (isOfflineError(error) || isQuotaExceededError(error)) {
+      const cached = getCachedChantiersBundle(userId);
+      if (cached) {
+        return { ...cached, fromCache: true };
       }
     }
-  );
-
-  // 2. Temporary read-access shares granted to this user
-  const unsubShares = onSnapshot(
-    query(collection(db, 'chantierShares'), where('readerUid', '==', userId)),
-    (snap) => {
-      const now = Date.now();
-      const activeIds = new Set<string>();
-      shareByChantierId.clear();
-
-      snap.docs.forEach((d) => {
-        const raw = d.data();
-        const expiresAtMs = raw.expiresAt?.toMillis?.() ?? 0;
-        if (raw.revoked === false && expiresAtMs > now) {
-          const share: ChantierShare = {
-            id: String(raw.id || d.id),
-            chantierId: String(raw.chantierId),
-            chantierOwnerId: String(raw.chantierOwnerId),
-            inviteCode: String(raw.inviteCode),
-            readerUid: String(raw.readerUid),
-            readerName: String(raw.readerName || ''),
-            label: String(raw.label || ''),
-            revoked: false,
-            expiresAtMs,
-          };
-          activeIds.add(share.chantierId);
-          shareByChantierId.set(share.chantierId, share);
-
-          if (!sharedDocUnsubs.has(share.chantierId)) {
-            const unsubCh = onSnapshot(
-              doc(db, 'chantiers', share.chantierId),
-              (chSnap) => {
-                if (chSnap.exists()) {
-                  sharedMap.set(share.chantierId, chSnap.data() as Chantier);
-                } else {
-                  sharedMap.delete(share.chantierId);
-                }
-                emit();
-              },
-              () => {
-                sharedMap.delete(share.chantierId);
-                emit();
-              }
-            );
-            sharedDocUnsubs.set(share.chantierId, unsubCh);
-          }
-        }
-      });
-
-      // Clean up expired or revoked listeners
-      Array.from(sharedDocUnsubs.keys()).forEach((cId) => {
-        if (!activeIds.has(cId)) {
-          sharedDocUnsubs.get(cId)?.();
-          sharedDocUnsubs.delete(cId);
-          sharedMap.delete(cId);
-        }
-      });
-
-      emit();
-    },
-    (error) => {
-      try {
-        handleFirestoreError(error, OperationType.LIST, 'chantierShares(reader)');
-      } catch (wrapped) {
-        onError?.(wrapped as Error);
-      }
-    }
-  );
-
-  return () => {
-    unsubOwned();
-    unsubShares();
-    sharedDocUnsubs.forEach((u) => u());
-    sharedDocUnsubs.clear();
-  };
+    handleFirestoreError(error, OperationType.LIST, 'chantiers');
+  }
 }
 
-export function subscribeChantierJournaux(
+export async function fetchChantierJournauxOnce(
   chantier: Chantier,
-  userId: string,
-  onData: (journals: Journal[]) => void,
-  onError?: (err: Error) => void
-): Unsubscribe {
+  userId: string
+): Promise<Journal[]> {
   const col = collection(db, 'chantiers', chantier.id, 'journaux');
   const q =
     chantier.ownerId === userId
       ? query(col, where('chantierOwnerId', '==', userId))
       : query(col, where('chantierReaderIds', 'array-contains', userId));
 
-  return onSnapshot(
-    q,
-    (snap) => {
-      const list = snap.docs.map((d) => {
+  try {
+    const snap = await getDocsFromServer(q);
+    const list = snap.docs
+      .map((d) => {
         const raw = d.data() as Journal;
         return {
           ...raw,
-          status: raw.status === 'completed' ? ('completed' as const) : ('in_progress' as const),
+          status:
+            raw.status === 'completed'
+              ? ('completed' as const)
+              : ('in_progress' as const),
           signatureControleur: raw.signatureControleur ?? null,
           signatureLecteur: raw.signatureLecteur ?? null,
         };
-      });
-      list.sort(
+      })
+      .sort(
         (a, b) =>
           (a.date || '').localeCompare(b.date || '') ||
           a.journalNum - b.journalNum
       );
-      onData(list);
-    },
-    (error) => {
-      try {
-        handleFirestoreError(
-          error,
-          OperationType.LIST,
-          `chantiers/${chantier.id}/journaux`
-        );
-      } catch (wrapped) {
-        onError?.(wrapped as Error);
-      }
+    setCachedJournals(chantier.id, list);
+    return list;
+  } catch (error) {
+    if (isOfflineError(error) || isQuotaExceededError(error)) {
+      const cached = getCachedJournals(chantier.id);
+      if (cached) return cached;
     }
-  );
+    handleFirestoreError(
+      error,
+      OperationType.LIST,
+      `chantiers/${chantier.id}/journaux`
+    );
+  }
 }
 
 export async function saveChantierCloud(
@@ -542,7 +960,7 @@ export async function saveChantierCloud(
       };
     }
 
-    const existingData = snap.data() as Chantier & { createdAt?: unknown };
+    const existingData = snap.data() as Chantier;
     const updateFields: Record<string, unknown> = {
       numero: clampStr(chantier.numero, 100),
       projet: clampStr(chantier.projet, 250),
@@ -702,35 +1120,9 @@ export async function deleteJournalCloud(
   }
 }
 
-export async function fetchAllJournalsForChantier(
-  chantier: Chantier,
-  userId: string
-): Promise<Journal[]> {
-  const col = collection(db, 'chantiers', chantier.id, 'journaux');
-  const q =
-    chantier.ownerId === userId
-      ? query(col, where('chantierOwnerId', '==', userId))
-      : query(col, where('chantierReaderIds', 'array-contains', userId));
-
-  try {
-    const snap = await getDocs(q);
-    return snap.docs
-      .map((d) => d.data() as Journal)
-      .sort(
-        (a, b) =>
-          (a.date || '').localeCompare(b.date || '') ||
-          a.journalNum - b.journalNum
-      );
-  } catch (error) {
-    handleFirestoreError(
-      error,
-      OperationType.LIST,
-      `chantiers/${chantier.id}/journaux`
-    );
-  }
-}
-
-// Temporary Share Invites & Grants (strictly linked to 1 specific chantier)
+// ---------------------------------------------------------------------------
+// Temporary Share Invites & Grants (Validity in MONTHS, default 36 = 3 ans)
+// ---------------------------------------------------------------------------
 
 function generateInviteCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -746,10 +1138,12 @@ export async function createShareInvite(
   chantier: Chantier,
   user: User,
   label: string,
-  durationHours: number
+  durationMonths: number
 ): Promise<ShareInvite> {
+  const safeMonths = Math.max(1, Math.min(120, Math.round(durationMonths)));
   const code = generateInviteCode();
-  const expiresAtDate = new Date(Date.now() + durationHours * 3600 * 1000);
+  const expiresAtDate = new Date();
+  expiresAtDate.setMonth(expiresAtDate.getMonth() + safeMonths);
   const expiresTs = Timestamp.fromDate(expiresAtDate);
   const ownerName =
     user.displayName || user.email?.split('@')[0] || 'Contrôleur INASEP';
@@ -788,75 +1182,64 @@ export async function createShareInvite(
   }
 }
 
-export function subscribeOwnerShareInvites(
+export async function fetchOwnerShareDataOnce(
   chantierId: string,
-  ownerId: string,
-  onData: (invites: ShareInvite[]) => void
-): Unsubscribe {
-  const q = query(
-    collection(db, 'shareInvites'),
-    where('ownerId', '==', ownerId)
-  );
-  return onSnapshot(
-    q,
-    (snap) => {
-      const list = snap.docs
-        .map((d) => {
-          const raw = d.data();
-          return {
-            code: String(raw.code || d.id),
-            chantierId: String(raw.chantierId),
-            chantierNumero: String(raw.chantierNumero || ''),
-            chantierProjet: String(raw.chantierProjet || ''),
-            ownerId: String(raw.ownerId),
-            ownerName: String(raw.ownerName || ''),
-            label: String(raw.label || ''),
-            active: Boolean(raw.active),
-            usedByUid: String(raw.usedByUid || ''),
-            expiresAtMs: raw.expiresAt?.toMillis?.() ?? 0,
-          } satisfies ShareInvite;
-        })
-        .filter((inv) => inv.chantierId === chantierId)
-        .sort((a, b) => b.expiresAtMs - a.expiresAtMs);
-      onData(list);
-    },
-    () => onData([])
-  );
-}
+  ownerId: string
+): Promise<{ invites: ShareInvite[]; shares: ChantierShare[] }> {
+  try {
+    const [invSnap, shSnap] = await Promise.all([
+      getDocs(
+        query(collection(db, 'shareInvites'), where('ownerId', '==', ownerId))
+      ),
+      getDocs(
+        query(
+          collection(db, 'chantierShares'),
+          where('chantierOwnerId', '==', ownerId)
+        )
+      ),
+    ]);
 
-export function subscribeOwnerChantierShares(
-  chantierId: string,
-  ownerId: string,
-  onData: (shares: ChantierShare[]) => void
-): Unsubscribe {
-  const q = query(
-    collection(db, 'chantierShares'),
-    where('chantierOwnerId', '==', ownerId)
-  );
-  return onSnapshot(
-    q,
-    (snap) => {
-      const list = snap.docs
-        .map((d) => {
-          const raw = d.data();
-          return {
-            id: String(raw.id || d.id),
-            chantierId: String(raw.chantierId),
-            chantierOwnerId: String(raw.chantierOwnerId),
-            inviteCode: String(raw.inviteCode),
-            readerUid: String(raw.readerUid),
-            readerName: String(raw.readerName || ''),
-            label: String(raw.label || ''),
-            revoked: Boolean(raw.revoked),
-            expiresAtMs: raw.expiresAt?.toMillis?.() ?? 0,
-          } satisfies ChantierShare;
-        })
-        .filter((s) => s.chantierId === chantierId)
-        .sort((a, b) => b.expiresAtMs - a.expiresAtMs);
-      onData(list);
-    },
-    () => onData([])
-  );
+    const invites: ShareInvite[] = invSnap.docs
+      .map((d) => {
+        const raw = d.data();
+        return {
+          code: String(raw.code || d.id),
+          chantierId: String(raw.chantierId),
+          chantierNumero: String(raw.chantierNumero || ''),
+          chantierProjet: String(raw.chantierProjet || ''),
+          ownerId: String(raw.ownerId),
+          ownerName: String(raw.ownerName || ''),
+          label: String(raw.label || ''),
+          active: Boolean(raw.active),
+          usedByUid: String(raw.usedByUid || ''),
+          expiresAtMs: raw.expiresAt?.toMillis?.() ?? 0,
+        };
+      })
+      .filter((inv) => inv.chantierId === chantierId)
+      .sort((a, b) => b.expiresAtMs - a.expiresAtMs);
+
+    const shares: ChantierShare[] = shSnap.docs
+      .map((d) => {
+        const raw = d.data();
+        return {
+          id: String(raw.id || d.id),
+          chantierId: String(raw.chantierId),
+          chantierOwnerId: String(raw.chantierOwnerId),
+          inviteCode: String(raw.inviteCode),
+          readerUid: String(raw.readerUid),
+          readerName: String(raw.readerName || ''),
+          label: String(raw.label || ''),
+          revoked: Boolean(raw.revoked),
+          expiresAtMs: raw.expiresAt?.toMillis?.() ?? 0,
+        };
+      })
+      .filter((s) => s.chantierId === chantierId)
+      .sort((a, b) => b.expiresAtMs - a.expiresAtMs);
+
+    return { invites, shares };
+  } catch {
+    return { invites: [], shares: [] };
+  }
 }
 
 export async function redeemShareInvite(
@@ -869,7 +1252,7 @@ export async function redeemShareInvite(
   }
 
   const inviteRef = doc(db, 'shareInvites', code);
-  const inviteSnap = await getDoc(inviteRef);
+  const inviteSnap = await getDocFromServer(inviteRef);
   if (!inviteSnap.exists()) {
     throw new Error("Ce code d'accès temporaire n'existe pas ou a été supprimé.");
   }
@@ -905,7 +1288,7 @@ export async function redeemShareInvite(
       });
     }
 
-    const existingShare = await getDoc(shareRef);
+    const existingShare = await getDocFromServer(shareRef);
     if (!existingShare.exists()) {
       await setDoc(shareRef, {
         id: shareId,
@@ -931,14 +1314,13 @@ export async function redeemShareInvite(
       });
     }
 
-    // Bind readerUid to chantier and its journals so list queries match immediately
     const chRef = doc(db, 'chantiers', chantierId);
     await updateDoc(chRef, {
       readerIds: arrayUnion(user.uid),
       updatedAt: serverTimestamp(),
     });
 
-    const chSnap = await getDoc(chRef);
+    const chSnap = await getDocFromServer(chRef);
     const knownJournalIds: string[] = Array.isArray(chSnap.data()?.journalIds)
       ? chSnap.data()!.journalIds
       : [];
@@ -958,54 +1340,16 @@ export async function redeemShareInvite(
 
     return {
       chantierId,
-      chantierProjet: String(inv.chantierProjet || inv.chantierNumero || chantierId),
+      chantierProjet: String(
+        inv.chantierProjet || inv.chantierNumero || chantierId
+      ),
     };
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `chantierShares/${shareId}`);
-  }
-}
-
-export async function syncPendingReadersToJournals(
-  chantier: Chantier,
-  ownerUid: string,
-  activeReaderIds: string[]
-): Promise<void> {
-  if (chantier.ownerId !== ownerUid || !activeReaderIds.length) return;
-  try {
-    const chRef = doc(db, 'chantiers', chantier.id);
-    const currentReaders = new Set(chantier.readerIds || []);
-    const missingOnCh = activeReaderIds.filter((id) => !currentReaders.has(id));
-    if (missingOnCh.length > 0) {
-      await updateDoc(chRef, {
-        readerIds: arrayUnion(...missingOnCh),
-        updatedAt: serverTimestamp(),
-      });
-    }
-
-    const jSnap = await getDocs(
-      query(
-        collection(db, 'chantiers', chantier.id, 'journaux'),
-        where('chantierOwnerId', '==', ownerUid)
-      )
+    handleFirestoreError(
+      error,
+      OperationType.WRITE,
+      `chantierShares/${shareId}`
     );
-    const toUpdate = jSnap.docs.filter((d) => {
-      const rIds: string[] = Array.isArray(d.data().chantierReaderIds)
-        ? d.data().chantierReaderIds
-        : [];
-      return activeReaderIds.some((id) => !rIds.includes(id));
-    });
-    for (let i = 0; i < toUpdate.length; i += 350) {
-      const batch = writeBatch(db);
-      toUpdate.slice(i, i + 350).forEach((d) => {
-        batch.update(d.ref, {
-          chantierReaderIds: arrayUnion(...activeReaderIds),
-          updatedAt: serverTimestamp(),
-        });
-      });
-      await batch.commit();
-    }
-  } catch {
-    // non-fatal background sync
   }
 }
 
@@ -1022,7 +1366,7 @@ export async function revokeChantierShare(share: ChantierShare): Promise<void> {
           updatedAt: serverTimestamp(),
         });
       } catch {
-        // invite may already be deleted
+        // ignore if already deleted
       }
     }
     await updateDoc(doc(db, 'chantiers', share.chantierId), {
@@ -1065,43 +1409,6 @@ export async function deactivateShareInvite(code: string): Promise<void> {
   }
 }
 
-export async function fetchAllUsersAdmin(): Promise<UserProfile[]> {
-  try {
-    const snap = await getDocs(collection(db, 'users'));
-    const profiles = await Promise.all(
-      snap.docs.map(async (d) => {
-        const pub = d.data() as UserProfile;
-        let email: string | undefined;
-        try {
-          const privSnap = await getDoc(
-            doc(db, 'users', d.id, 'private', 'info')
-          );
-          if (privSnap.exists()) {
-            email = String(privSnap.data().email || '');
-          }
-        } catch {
-          // ignore if missing
-        }
-        return {
-          uid: pub.uid || d.id,
-          displayName: pub.displayName || 'Utilisateur',
-          role: pub.role === 'admin' ? ('admin' as const) : ('user' as const),
-          active: typeof pub.active === 'boolean' ? pub.active : false,
-          defaultPrepose: String(pub.defaultPrepose || ''),
-          defaultHoraireDebut: String(pub.defaultHoraireDebut || '07:30'),
-          defaultHoraireFin: String(pub.defaultHoraireFin || '16:30'),
-          email,
-        };
-      })
-    );
-    return profiles.sort((a, b) =>
-      a.displayName.localeCompare(b.displayName)
-    );
-  } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, 'users');
-  }
-}
-
 export async function importLocalDbToCloud(
   localDb: DB,
   user: User,
@@ -1116,6 +1423,9 @@ export async function importLocalDbToCloud(
     const cId = sanitizeDocId(ch.id);
     if (existingIds.has(cId)) continue;
 
+    const childJournals = localDb.journaux.filter((j) => j.chantierId === ch.id);
+    const childJournalIds = childJournals.map((j) => sanitizeDocId(j.id));
+
     const cRef = doc(db, 'chantiers', cId);
     const cPayload = sanitizeChantierPayload(
       { ...ch, id: cId, visibility: 'private', readerIds: [] },
@@ -1123,6 +1433,8 @@ export async function importLocalDbToCloud(
       ownerName,
       true
     );
+    cPayload.journalIds = childJournalIds.slice(0, 1000);
+
     try {
       await setDoc(cRef, cPayload);
       importedChantiers += 1;
@@ -1130,7 +1442,6 @@ export async function importLocalDbToCloud(
       handleFirestoreError(error, OperationType.CREATE, `chantiers/${cId}`);
     }
 
-    const childJournals = localDb.journaux.filter((j) => j.chantierId === ch.id);
     for (let i = 0; i < childJournals.length; i += 350) {
       const batch = writeBatch(db);
       for (const j of childJournals.slice(i, i + 350)) {

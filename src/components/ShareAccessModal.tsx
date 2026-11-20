@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { type User } from 'firebase/auth';
 import {
   Clock,
   Copy,
   KeyRound,
   Link2,
+  RefreshCw,
   ShieldOff,
   UserCheck,
   X,
@@ -13,9 +14,8 @@ import type { Chantier, ChantierShare, ShareInvite } from '../types';
 import {
   createShareInvite,
   deactivateShareInvite,
+  fetchOwnerShareDataOnce,
   revokeChantierShare,
-  subscribeOwnerChantierShares,
-  subscribeOwnerShareInvites,
 } from '../utils/firestoreService';
 
 interface ShareAccessModalProps {
@@ -26,12 +26,13 @@ interface ShareAccessModalProps {
   onNotify: (msg: string, tone?: 'default' | 'success' | 'error') => void;
 }
 
-const DURATION_OPTIONS = [
-  { hours: 24, label: '24 heures' },
-  { hours: 48, label: '48 heures' },
-  { hours: 24 * 7, label: '7 jours' },
-  { hours: 24 * 14, label: '14 jours' },
-  { hours: 24 * 30, label: '30 jours' },
+const MONTH_OPTIONS = [
+  { months: 1, label: '1 mois' },
+  { months: 3, label: '3 mois' },
+  { months: 6, label: '6 mois' },
+  { months: 12, label: '12 mois (1 an)' },
+  { months: 24, label: '24 mois (2 ans)' },
+  { months: 36, label: '36 mois (3 ans)' },
 ];
 
 export function ShareAccessModal({
@@ -42,28 +43,30 @@ export function ShareAccessModal({
   onNotify,
 }: ShareAccessModalProps) {
   const [label, setLabel] = useState('');
-  const [durationHours, setDurationHours] = useState(24 * 7);
+  const [durationMonths, setDurationMonths] = useState<number>(36);
+  const [useCustomMonths, setUseCustomMonths] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [invites, setInvites] = useState<ShareInvite[]>([]);
   const [shares, setShares] = useState<ChantierShare[]>([]);
 
+  const loadShareData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await fetchOwnerShareDataOnce(chantier.id, user.uid);
+      setInvites(data.invites);
+      setShares(data.shares);
+    } finally {
+      setLoading(false);
+    }
+  }, [chantier.id, user.uid]);
+
   useEffect(() => {
     if (!open) return;
-    const unsubInv = subscribeOwnerShareInvites(
-      chantier.id,
-      user.uid,
-      setInvites
-    );
-    const unsubShares = subscribeOwnerChantierShares(
-      chantier.id,
-      user.uid,
-      setShares
-    );
-    return () => {
-      unsubInv();
-      unsubShares();
-    };
-  }, [open, chantier.id, user.uid]);
+    setDurationMonths(36);
+    setUseCustomMonths(false);
+    void loadShareData();
+  }, [open, loadShareData]);
 
   if (!open) return null;
 
@@ -77,18 +80,28 @@ export function ShareAccessModal({
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
+    const safeMonths = Math.max(1, Math.min(120, Math.round(durationMonths || 36)));
     setCreating(true);
     try {
       const inv = await createShareInvite(
         chantier,
         user,
         label || 'Lecteur autorisé',
-        durationHours
+        safeMonths
       );
       setLabel('');
-      onNotify(`Code temporaire généré : ${inv.code}`, 'success');
-    } catch {
-      onNotify("Impossible de créer l'accès temporaire.", 'error');
+      setInvites((prev) => [inv, ...prev]);
+      onNotify(
+        `Code temporaire généré (${safeMonths} mois) : ${inv.code}`,
+        'success'
+      );
+    } catch (err) {
+      onNotify(
+        err instanceof Error
+          ? err.message
+          : "Impossible de créer l'accès temporaire.",
+        'error'
+      );
     } finally {
       setCreating(false);
     }
@@ -134,14 +147,26 @@ export function ShareAccessModal({
               </strong>
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="min-h-[44px] min-w-[44px] -mr-2 flex items-center justify-center rounded-xl text-slate-400 hover:text-slate-700 hover:bg-slate-100 cursor-pointer"
-            aria-label="Fermer"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              onClick={() => void loadShareData()}
+              disabled={loading}
+              className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl text-slate-400 hover:text-[#0a5b9c] hover:bg-slate-100 cursor-pointer disabled:opacity-50"
+              title="Actualiser"
+              aria-label="Actualiser"
+            >
+              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="min-h-[44px] min-w-[44px] -mr-2 flex items-center justify-center rounded-xl text-slate-400 hover:text-slate-700 hover:bg-slate-100 cursor-pointer"
+              aria-label="Fermer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         <div className="overflow-y-auto p-5 space-y-5">
@@ -154,10 +179,10 @@ export function ShareAccessModal({
               Accorder un nouvel accès temporaire
             </div>
             <p className="text-xs text-slate-500 leading-relaxed">
-              Le destinataire (compte approuvé par l&apos;administrateur) pourra
-              consulter les pages terminées, la page en cours et les semaines
-              terminées de ce dossier uniquement, signer via itsme®/eID et
-              télécharger le PDF une fois la semaine entièrement signée.
+              Le destinataire (compte approuvé) pourra consulter les pages
+              terminées, la page en cours et les semaines terminées de ce
+              dossier uniquement, signer via itsme®/eID et télécharger le PDF
+              une fois la semaine entièrement signée.
             </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -176,19 +201,54 @@ export function ShareAccessModal({
 
               <div>
                 <label className="block text-xs font-semibold text-slate-500 mb-1">
-                  Durée de validité
+                  Validité en mois (pré-encodée : 3 ans)
                 </label>
-                <select
-                  value={durationHours}
-                  onChange={(e) => setDurationHours(Number(e.target.value))}
-                  className="w-full min-h-[44px] px-3 rounded-xl border border-slate-200 bg-white text-sm font-medium text-slate-900 focus:outline-none focus:border-[#0a5b9c]"
-                >
-                  {DURATION_OPTIONS.map((opt) => (
-                    <option key={opt.hours} value={opt.hours}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
+                {!useCustomMonths ? (
+                  <select
+                    value={durationMonths}
+                    onChange={(e) => {
+                      if (e.target.value === 'custom') {
+                        setUseCustomMonths(true);
+                      } else {
+                        setDurationMonths(Number(e.target.value));
+                      }
+                    }}
+                    className="w-full min-h-[44px] px-3 rounded-xl border border-slate-200 bg-white text-sm font-medium text-slate-900 focus:outline-none focus:border-[#0a5b9c]"
+                  >
+                    {MONTH_OPTIONS.map((opt) => (
+                      <option key={opt.months} value={opt.months}>
+                        {opt.label}
+                      </option>
+                    ))}
+                    <option value="custom">Autre durée (en mois)…</option>
+                  </select>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={1}
+                      max={120}
+                      value={durationMonths}
+                      onChange={(e) =>
+                        setDurationMonths(Math.max(1, Number(e.target.value) || 1))
+                      }
+                      className="w-full min-h-[44px] px-3 rounded-xl border border-slate-200 bg-white text-sm font-medium text-slate-900 tabular-nums focus:outline-none focus:border-[#0a5b9c]"
+                    />
+                    <span className="text-xs font-semibold text-slate-500 shrink-0">
+                      mois
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setUseCustomMonths(false);
+                        setDurationMonths(36);
+                      }}
+                      className="text-xs font-semibold text-[#0a5b9c] hover:underline shrink-0 cursor-pointer"
+                    >
+                      3 ans
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -229,7 +289,7 @@ export function ShareAccessModal({
                       </div>
                       <div className="text-xs text-slate-500 tabular-nums">
                         {s.label ? `${s.label} · ` : ''}Expire le{' '}
-                        {new Date(s.expiresAtMs).toLocaleString('fr-BE')}
+                        {new Date(s.expiresAtMs).toLocaleDateString('fr-BE')}
                       </div>
                     </div>
                     <button
@@ -237,6 +297,9 @@ export function ShareAccessModal({
                       onClick={async () => {
                         try {
                           await revokeChantierShare(s);
+                          setShares((prev) =>
+                            prev.filter((item) => item.id !== s.id)
+                          );
                           onNotify('Accès temporaire révoqué.', 'default');
                         } catch {
                           onNotify('Impossible de révoquer.', 'error');
@@ -280,7 +343,7 @@ export function ShareAccessModal({
                       </div>
                       <div className="text-[11px] text-slate-500 tabular-nums mt-0.5">
                         Valable jusqu&apos;au{' '}
-                        {new Date(inv.expiresAtMs).toLocaleString('fr-BE')}
+                        {new Date(inv.expiresAtMs).toLocaleDateString('fr-BE')}
                         {inv.usedByUid ? ' · Utilisé' : ' · Non encore utilisé'}
                       </div>
                     </div>
@@ -316,6 +379,9 @@ export function ShareAccessModal({
                         onClick={async () => {
                           try {
                             await deactivateShareInvite(inv.code);
+                            setInvites((prev) =>
+                              prev.filter((item) => item.code !== inv.code)
+                            );
                             onNotify('Code désactivé.');
                           } catch {
                             onNotify('Erreur lors de la désactivation.', 'error');

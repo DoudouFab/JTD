@@ -1,4 +1,4 @@
-import { getApps, initializeApp } from 'firebase/app';
+import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import {
   doc,
@@ -25,13 +25,6 @@ export const db = initializeFirestore(
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
-
-export function getSecondaryAuth() {
-  const existing = getApps().find((a) => a.name === 'admin-user-creator');
-  const secondaryApp =
-    existing || initializeApp(firebaseConfig, 'admin-user-creator');
-  return getAuth(secondaryApp);
-}
 
 export function isAdminEmail(email?: string | null): boolean {
   const normalized = (email || '').trim().toLowerCase();
@@ -64,11 +57,40 @@ export interface FirestoreErrorInfo {
   };
 }
 
+export const FIRESTORE_QUOTA_URL = `https://console.firebase.google.com/project/${firebaseConfig.projectId}/firestore/databases/${firebaseConfig.firestoreDatabaseId}/data?openUpgradeDialog=true`;
+
+export function isQuotaExceededError(err: unknown): boolean {
+  const code = (err as { code?: string })?.code || '';
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    code === 'resource-exhausted' ||
+    msg.includes('quota exceeded') ||
+    msg.includes('resource-exhausted')
+  );
+}
+
+export function isOfflineError(err: unknown): boolean {
+  const code = (err as { code?: string })?.code || '';
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    code === 'unavailable' ||
+    msg.includes('offline') ||
+    msg.includes('network') ||
+    msg.includes('failed to get document because the client is offline')
+  );
+}
+
 export function handleFirestoreError(
   error: unknown,
   operationType: OperationType,
   path: string | null
 ): never {
+  if (isQuotaExceededError(error)) {
+    throw new Error(
+      'Quota gratuit quotidien Firestore dépassé. Le quota se réinitialise automatiquement demain (voir offre Spark dans la console Firebase).'
+    );
+  }
+
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
@@ -90,17 +112,18 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
-async function testConnection() {
+export async function testFirestoreConnection(): Promise<boolean> {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
+    return true;
   } catch (error) {
     if (
       error instanceof Error &&
       error.message.includes('the client is offline')
     ) {
       console.error('Please check your Firebase configuration.');
+      return false;
     }
+    return true;
   }
 }
-
-void testConnection();

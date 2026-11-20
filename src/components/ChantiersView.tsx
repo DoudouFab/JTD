@@ -9,6 +9,7 @@ import {
   Lock,
   Pencil,
   Plus,
+  RefreshCw,
   Search,
   Trash2,
   Upload,
@@ -30,6 +31,8 @@ interface ChantiersViewProps {
   onRedeemInvite: (code: string) => Promise<void>;
   onExportJson: () => void;
   onImportJsonFile: (file: File) => void;
+  onRefresh?: () => void;
+  refreshing?: boolean;
 }
 
 export function ChantiersView({
@@ -47,6 +50,8 @@ export function ChantiersView({
   onRedeemInvite,
   onExportJson,
   onImportJsonFile,
+  onRefresh,
+  refreshing,
 }: ChantiersViewProps) {
   const [query, setQuery] = useState('');
   const [scope, setScope] = useState<'all' | 'mine' | 'shared'>('all');
@@ -146,14 +151,30 @@ export function ChantiersView({
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={onNewChantier}
-          className="min-h-[44px] px-4 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-sm flex items-center justify-center gap-2 shadow-xs cursor-pointer shrink-0"
-        >
-          <Plus className="w-4 h-4" />
-          Nouveau chantier
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          {onRefresh && (
+            <button
+              type="button"
+              disabled={refreshing}
+              onClick={onRefresh}
+              className="min-h-[44px] px-3.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-sm flex items-center gap-2 cursor-pointer disabled:opacity-60"
+              title="Synchroniser depuis le cloud"
+            >
+              <RefreshCw
+                className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`}
+              />
+              <span className="hidden sm:inline">Actualiser</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onNewChantier}
+            className="min-h-[44px] px-4 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-sm flex items-center justify-center gap-2 shadow-xs cursor-pointer shrink-0"
+          >
+            <Plus className="w-4 h-4" />
+            Nouveau chantier
+          </button>
+        </div>
       </div>
 
       {/* Join Temporary Read-Only Chantier Bar */}

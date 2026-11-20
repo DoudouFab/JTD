@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Mes JTD">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0d6ebd" />
+      <stop offset="100%" stop-color="#053d73" />
+    </linearGradient>
+    <linearGradient id="check" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#0ea5e9" />
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="512" height="512" rx="112" fill="url(#bg)" />
+  <!-- Clipboard body -->
+  <rect x="122" y="102" width="268" height="346" rx="28" fill="#ffffff" />
+  <!-- Clip recess -->
+  <rect x="182" y="92" width="148" height="56" rx="16" fill="#064e8c" />
+  <!-- Clip head -->
+  <rect x="194" y="84" width="124" height="50" rx="14" fill="#ffffff" />
+  <circle cx="256" cy="84" r="26" fill="#ffffff" />
+  <circle cx="256" cy="84" r="10" fill="#075498" />
+  <!-- Checkmark -->
+  <path
+    d="M196 244 L238 286 L326 196"
+    fill="none"
+    stroke="url(#check)"
+    stroke-width="34"
+    stroke-linecap="square"
+    stroke-linejoin="miter"
+  />
+  <!-- JTD Monogram -->
+  <text
+    x="256"
+    y="412"
+    text-anchor="middle"
+    font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+    font-size="92"
+    font-weight="900"
+    letter-spacing="4"
+    fill="#064e8c"
+  >JTD</text>
+</svg>

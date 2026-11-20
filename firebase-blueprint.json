@@ -1,5 +1,48 @@
 {
   "entities": {
+    "PreauthorizedEmail": {
+      "title": "PreauthorizedEmail",
+      "description": "E-mail préautorisé par l'administrateur avec son code personnel d'activation.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "minLength": 3, "maxLength": 200 },
+        "accessCode": { "type": "string", "minLength": 3, "maxLength": 32 },
+        "note": { "type": "string", "maxLength": 250 },
+        "createdBy": { "type": "string", "minLength": 3, "maxLength": 200 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "email", "accessCode", "note", "createdBy", "createdAt"]
+    },
+    "AccessUser": {
+      "title": "AccessUser",
+      "description": "Fiche d'accès par appareil pour un collègue authentifié (pending, approved, revoked).",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "minLength": 3, "maxLength": 200 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["admin", "user"] },
+        "status": { "type": "string", "enum": ["pending", "approved", "revoked"] },
+        "deviceHint": { "type": "string", "maxLength": 120 },
+        "note": { "type": "string", "maxLength": 250 },
+        "activationCode": { "type": "string", "maxLength": 32 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "uid",
+        "email",
+        "displayName",
+        "role",
+        "status",
+        "deviceHint",
+        "note",
+        "activationCode",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
     "UserPublic": {
       "title": "UserPublic",
       "description": "Profil public et préférences d'un utilisateur autorisé (sans données PII).",
@@ -211,6 +254,14 @@
     }
   },
   "firestore": {
+    "/preauthorized_emails/{emailId}": {
+      "schema": { "$ref": "#/entities/PreauthorizedEmail" },
+      "description": "E-mails préautorisés avec code personnel créés exclusivement par l'administrateur."
+    },
+    "/access_users/{userId}": {
+      "schema": { "$ref": "#/entities/AccessUser" },
+      "description": "Statut d'accès par appareil pour les collègues (pending, approved, revoked)."
+    },
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserPublic" },
       "description": "Profil public de l'utilisateur (nom, rôle, statut d'approbation admin, préférences)."

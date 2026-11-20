@@ -12,31 +12,44 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isVerified() {
-      return isSignedIn() && request.auth.token.email_verified == true;
+    function isVerifiedUser() {
+      return isSignedIn()
+        && request.auth.token.email is string
+        && (request.auth.token.email_verified == true
+            || request.auth.token.firebase.sign_in_provider == 'google.com');
     }
 
-    // Sole Administrator (Fabien Pirquin)
+    // Sole Administrator (Fabien Pirquin: Gmail or INASEP verified)
     function isAdmin() {
-      return isVerified()
-        && (request.auth.token.email == 'fabien.pirquin@inasep.be'
-          || request.auth.token.email == 'pirquinfabien@gmail.com');
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email is string
+        && (request.auth.token.email.lower() == 'pirquinfabien@gmail.com'
+            || request.auth.token.email.lower() == 'fabien.pirquin@inasep.be');
+    }
+
+    function normalizeEmailId(email) {
+      return email.lower().replace('[^a-z0-9\\-]', '_');
     }
 
     function isVerifiedActive() {
-      return isVerified() && (
+      return isVerifiedUser() && (
         isAdmin()
-        || (exists(/databases/$(database)/documents/users/$(request.auth.uid))
-            && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.active == true)
+        || (exists(/databases/$(database)/documents/access_users/$(request.auth.uid))
+            && get(/databases/$(database)/documents/access_users/$(request.auth.uid)).data.status == 'approved')
       );
     }
 
     function isOwner(userId) {
-      return isVerified() && request.auth.uid == userId;
+      return isVerifiedUser() && request.auth.uid == userId;
     }
 
     function isValidId(id) {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidEmailId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 200 && id.matches('^[a-z0-9_\\-]+$');
     }
 
     function isValidShareDocId(id) {
@@ -57,6 +70,42 @@ service cloud.firestore {
 
     function isStringListBounded(val, maxItems) {
       return val is list && val.size() <= maxItems && (val.size() == 0 || val[0] is string);
+    }
+
+    function isValidPreauthorizedEmail(data) {
+      return data.keys().hasAll([
+        'id', 'email', 'accessCode', 'note', 'createdBy', 'createdAt'
+      ])
+      && data.keys().hasOnly([
+        'id', 'email', 'accessCode', 'note', 'createdBy', 'createdAt'
+      ])
+      && isValidEmailId(data.id)
+      && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
+      && data.accessCode is string && data.accessCode.size() >= 3 && data.accessCode.size() <= 32
+      && isStringBounded(data.note, 250)
+      && data.createdBy is string && data.createdBy.size() >= 3 && data.createdBy.size() <= 200
+      && data.createdAt is timestamp;
+    }
+
+    function isValidAccessUser(data) {
+      return data.keys().hasAll([
+        'uid', 'email', 'displayName', 'role', 'status',
+        'deviceHint', 'note', 'activationCode', 'createdAt', 'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'uid', 'email', 'displayName', 'role', 'status',
+        'deviceHint', 'note', 'activationCode', 'createdAt', 'updatedAt'
+      ])
+      && isValidId(data.uid)
+      && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
+      && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+      && data.role in ['admin', 'user']
+      && data.status in ['pending', 'approved', 'revoked']
+      && isStringBounded(data.deviceHint, 120)
+      && isStringBounded(data.note, 250)
+      && isStringBounded(data.activationCode, 32)
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
     }
 
     function isValidSignatureRecord(sig, expectedRole) {
@@ -250,27 +299,134 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/chantierShares/$(chantierId + '_' + request.auth.uid)).data.expiresAt > request.time;
     }
 
-    match /users/{userId} {
-      allow get: if isVerified() && isValidId(userId) && (isAdmin() || userId == request.auth.uid);
-      allow list: if isVerified() && (isAdmin() || resource.data.uid == request.auth.uid);
+    // -------------------------------------------------------------------------
+    // 1. Preauthorized Emails & Personal Activation Codes
+    // -------------------------------------------------------------------------
+    match /preauthorized_emails/{emailId} {
+      allow get: if isVerifiedUser()
+        && isValidEmailId(emailId)
+        && (isAdmin() || emailId == normalizeEmailId(request.auth.token.email));
 
-      // Self-registered users start as pending approval (active == false, role == 'user').
-      // Only the sole Admin (Fabien Pirquin) starts active with role 'admin', or creates pre-approved 'user' accounts.
-      allow create: if isVerified()
+      allow list: if isAdmin();
+
+      allow create: if isAdmin()
+        && isValidEmailId(emailId)
+        && isValidPreauthorizedEmail(incoming())
+        && incoming().id == emailId
+        && normalizeEmailId(incoming().email) == emailId
+        && incoming().createdBy == request.auth.token.email
+        && incoming().createdAt == request.time;
+
+      allow update: if isAdmin()
+        && isValidEmailId(emailId)
+        && isValidPreauthorizedEmail(incoming())
+        && incoming().id == existing().id
+        && incoming().email == existing().email
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['accessCode', 'note']);
+
+      allow delete: if isAdmin() && isValidEmailId(emailId);
+    }
+
+    // -------------------------------------------------------------------------
+    // 2. Per-Device Access Control (access_users/{userId})
+    // -------------------------------------------------------------------------
+    match /access_users/{userId} {
+      allow get: if isVerifiedUser()
+        && isValidId(userId)
+        && (isAdmin() || userId == request.auth.uid);
+
+      allow list: if isAdmin();
+
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidAccessUser(incoming())
+        && incoming().uid == userId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (userId == request.auth.uid
+              && incoming().role == 'user'
+              && incoming().email.lower() == request.auth.token.email.lower()
+              && (
+                (incoming().status == 'pending' && incoming().activationCode == '')
+                || (incoming().status == 'approved'
+                    && incoming().activationCode.size() >= 3
+                    && exists(/databases/$(database)/documents/preauthorized_emails/$(normalizeEmailId(request.auth.token.email)))
+                    && incoming().activationCode.lower() == get(/databases/$(database)/documents/preauthorized_emails/$(normalizeEmailId(request.auth.token.email))).data.accessCode.lower())
+              ))
+        );
+
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidAccessUser(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Admin can approve, revoke, edit note/code
+          (isAdmin()
+            && incoming().role in ['admin', 'user']
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'note', 'activationCode', 'displayName', 'deviceHint', 'email', 'updatedAt'
+            ]))
+          // Colleague already approved: metadata sync only (never self-promote role or alter status)
+          || (userId == request.auth.uid
+              && existing().status == 'approved'
+              && incoming().status == 'approved'
+              && incoming().role == existing().role
+              && incoming().role == 'user'
+              && incoming().email.lower() == request.auth.token.email.lower()
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'displayName', 'deviceHint', 'email', 'updatedAt'
+              ]))
+          // Colleague activating from 'pending' using valid personal code (blocked if existing().status == 'revoked')
+          || (userId == request.auth.uid
+              && existing().status == 'pending'
+              && incoming().status == 'approved'
+              && incoming().role == 'user'
+              && incoming().email.lower() == request.auth.token.email.lower()
+              && incoming().activationCode.size() >= 3
+              && exists(/databases/$(database)/documents/preauthorized_emails/$(normalizeEmailId(request.auth.token.email)))
+              && incoming().activationCode.lower() == get(/databases/$(database)/documents/preauthorized_emails/$(normalizeEmailId(request.auth.token.email))).data.accessCode.lower()
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'status', 'activationCode', 'displayName', 'deviceHint', 'note', 'email', 'updatedAt'
+              ]))
+          // Colleague remaining pending: device hint sync
+          || (userId == request.auth.uid
+              && existing().status == 'pending'
+              && incoming().status == 'pending'
+              && incoming().role == 'user'
+              && incoming().email.lower() == request.auth.token.email.lower()
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'displayName', 'deviceHint', 'email', 'updatedAt'
+              ]))
+        );
+
+      allow delete: if isAdmin() && isValidId(userId) && userId != request.auth.uid;
+    }
+
+    // -------------------------------------------------------------------------
+    // 3. User Preferences (users/{userId})
+    // -------------------------------------------------------------------------
+    match /users/{userId} {
+      allow get: if isVerifiedUser() && isValidId(userId) && (isAdmin() || userId == request.auth.uid);
+      allow list: if isAdmin() || (isVerifiedUser() && resource.data.uid == request.auth.uid);
+
+      allow create: if isVerifiedActive()
         && isValidId(userId)
         && isValidUserPublic(incoming())
         && incoming().uid == userId
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
         && (
-          (isAdmin() && (
-            (userId == request.auth.uid && incoming().role == 'admin' && incoming().active == true)
-            || (userId != request.auth.uid && incoming().role == 'user')
-          ))
-          || (userId == request.auth.uid && incoming().role == 'user' && incoming().active == false)
+          (isAdmin() && userId == request.auth.uid && incoming().role == 'admin' && incoming().active == true)
+          || (userId == request.auth.uid && incoming().role == 'user' && incoming().active == true)
         );
 
-      allow update: if isVerified()
+      allow update: if isVerifiedActive()
         && isValidId(userId)
         && isValidUserPublic(incoming())
         && incoming().uid == existing().uid
@@ -278,9 +434,7 @@ service cloud.firestore {
         && incoming().role == existing().role
         && incoming().updatedAt == request.time
         && (
-          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly([
-            'displayName', 'active', 'defaultPrepose', 'defaultHoraireDebut', 'defaultHoraireFin', 'updatedAt'
-          ]))
+          isAdmin()
           || (isOwner(userId)
               && incoming().active == existing().active
               && incoming().diff(existing()).affectedKeys().hasOnly([
@@ -292,7 +446,7 @@ service cloud.firestore {
 
       match /private/{docId} {
         allow get: if isValidId(userId) && docId == 'info' && (isOwner(userId) || isAdmin());
-        allow list: if isAdmin() || (isVerified() && userId == request.auth.uid);
+        allow list: if isAdmin() || (isVerifiedUser() && userId == request.auth.uid);
 
         allow create: if isValidId(userId)
           && docId == 'info'
@@ -311,9 +465,12 @@ service cloud.firestore {
       }
     }
 
+    // -------------------------------------------------------------------------
+    // 4. Temporary Share Invites & Grants
+    // -------------------------------------------------------------------------
     match /shareInvites/{inviteCode} {
       allow get: if isVerifiedActive() && isValidId(inviteCode);
-      allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.ownerId == request.auth.uid;
 
       allow create: if isVerifiedActive()
         && isValidId(inviteCode)
@@ -354,7 +511,7 @@ service cloud.firestore {
         && isValidShareDocId(shareId)
         && (existing().chantierOwnerId == request.auth.uid || existing().readerUid == request.auth.uid);
 
-      allow list: if isVerified()
+      allow list: if isVerifiedUser()
         && (resource.data.chantierOwnerId == request.auth.uid || resource.data.readerUid == request.auth.uid);
 
       allow create: if isVerifiedActive()
@@ -403,12 +560,15 @@ service cloud.firestore {
         && existing().chantierOwnerId == request.auth.uid;
     }
 
+    // -------------------------------------------------------------------------
+    // 5. Private Chantiers & Daily Journals
+    // -------------------------------------------------------------------------
     match /chantiers/{chantierId} {
       allow get: if isVerifiedActive()
         && isValidId(chantierId)
         && (existing().ownerId == request.auth.uid || hasActiveShare(chantierId));
 
-      allow list: if isVerified()
+      allow list: if isVerifiedUser()
         && (resource.data.ownerId == request.auth.uid
           || request.auth.uid in resource.data.readerIds);
 
@@ -453,7 +613,7 @@ service cloud.firestore {
           && (get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid
               || hasActiveShare(chantierId));
 
-        allow list: if isVerified()
+        allow list: if isVerifiedUser()
           && (resource.data.chantierOwnerId == request.auth.uid
             || request.auth.uid in resource.data.chantierReaderIds);
 
@@ -484,7 +644,6 @@ service cloud.firestore {
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
           && (
-            // Action 1: Owner edits unsigned journal content or marks page completed/in_progress
             (existing().chantierOwnerId == request.auth.uid
               && existing().signatureControleur == null
               && existing().signatureLecteur == null
@@ -494,21 +653,18 @@ service cloud.firestore {
                 'travaux', 'materiel', 'materiaux', 'essais', 'evenements',
                 'decisions', 'visites', 'sigEntrepreneur', 'updatedAt'
               ]))
-            // Action 2: Owner applies Controller signature once on a completed page
             || (existing().chantierOwnerId == request.auth.uid
                 && existing().status == 'completed'
                 && existing().signatureControleur == null
                 && incoming().signatureControleur != null
                 && incoming().signatureControleur.signerUid == request.auth.uid
                 && incoming().diff(existing()).affectedKeys().hasOnly(['signatureControleur', 'updatedAt']))
-            // Action 3: Temporary Reader applies Reader signature once on a completed page
             || (hasActiveShare(chantierId)
                 && existing().status == 'completed'
                 && existing().signatureLecteur == null
                 && incoming().signatureLecteur != null
                 && incoming().signatureLecteur.signerUid == request.auth.uid
                 && incoming().diff(existing()).affectedKeys().hasOnly(['signatureLecteur', 'updatedAt']))
-            // Action 4: Syncing chantierReaderIds by owner or redeeming reader
             || (existing().chantierOwnerId == request.auth.uid
                 && incoming().diff(existing()).affectedKeys().hasOnly(['chantierReaderIds', 'updatedAt']))
             || (hasActiveShare(chantierId)

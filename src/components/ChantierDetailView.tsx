@@ -9,6 +9,7 @@ import {
   Pencil,
   Plus,
   Printer,
+  RefreshCw,
   Search,
   Share2,
   ShieldCheck,
@@ -48,6 +49,8 @@ interface ChantierDetailViewProps {
   ) => void;
   onPrintWeek: (weekJournals: Journal[]) => void;
   onExportWeekPdf: (weekJournals: Journal[]) => void;
+  onRefresh?: () => void;
+  refreshing?: boolean;
 }
 
 export function ChantierDetailView({
@@ -70,6 +73,8 @@ export function ChantierDetailView({
   onSignJournals,
   onPrintWeek,
   onExportWeekPdf,
+  onRefresh,
+  refreshing,
 }: ChantierDetailViewProps) {
   const [query, setQuery] = useState('');
   const normalizedQuery = query.trim().toLowerCase();
@@ -161,47 +166,63 @@ export function ChantierDetailView({
           </div>
         </div>
 
-        {isOwner && (
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {onRefresh && (
             <button
               type="button"
-              onClick={onEditChantier}
-              className="min-h-[44px] px-3.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-sm flex items-center gap-1.5 cursor-pointer"
+              disabled={refreshing}
+              onClick={onRefresh}
+              className="min-h-[44px] px-3.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-sm flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+              title="Actualiser les journaux depuis le cloud"
             >
-              <Pencil className="w-4 h-4" />
-              Modifier
+              <RefreshCw
+                className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`}
+              />
+              <span className="hidden sm:inline">Actualiser</span>
             </button>
-            <button
-              type="button"
-              onClick={onOpenShareAccess}
-              className="min-h-[44px] px-3.5 rounded-xl border border-[#0a5b9c]/35 bg-[#0a5b9c]/[0.06] hover:bg-[#0a5b9c]/10 text-[#0a5b9c] font-semibold text-sm flex items-center gap-1.5 cursor-pointer"
-              title="Accorder un accès temporaire en lecture sur ce dossier"
-            >
-              <Clock className="w-4 h-4" />
-              Accès temporaire
-              {(chantier.readerIds?.length || 0) > 0
-                ? ` (${chantier.readerIds!.length})`
-                : ''}
-            </button>
-            <button
-              type="button"
-              onClick={onShareHtml}
-              className="min-h-[44px] px-3.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-sm flex items-center gap-1.5 cursor-pointer"
-              title="Générer une fiche HTML en consultation seule"
-            >
-              <Share2 className="w-4 h-4" />
-              HTML
-            </button>
-            <button
-              type="button"
-              onClick={onNewJournal}
-              className="min-h-[44px] px-4 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-sm flex items-center gap-1.5 shadow-xs cursor-pointer"
-            >
-              <Plus className="w-4 h-4" />
-              Nouveau journal
-            </button>
-          </div>
-        )}
+          )}
+          {isOwner && (
+            <>
+              <button
+                type="button"
+                onClick={onEditChantier}
+                className="min-h-[44px] px-3.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-sm flex items-center gap-1.5 cursor-pointer"
+              >
+                <Pencil className="w-4 h-4" />
+                Modifier
+              </button>
+              <button
+                type="button"
+                onClick={onOpenShareAccess}
+                className="min-h-[44px] px-3.5 rounded-xl border border-[#0a5b9c]/35 bg-[#0a5b9c]/[0.06] hover:bg-[#0a5b9c]/10 text-[#0a5b9c] font-semibold text-sm flex items-center gap-1.5 cursor-pointer"
+                title="Accorder un accès temporaire en lecture sur ce dossier"
+              >
+                <Clock className="w-4 h-4" />
+                Accès temporaire
+                {(chantier.readerIds?.length || 0) > 0
+                  ? ` (${chantier.readerIds!.length})`
+                  : ''}
+              </button>
+              <button
+                type="button"
+                onClick={onShareHtml}
+                className="min-h-[44px] px-3.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-sm flex items-center gap-1.5 cursor-pointer"
+                title="Générer une fiche HTML en consultation seule"
+              >
+                <Share2 className="w-4 h-4" />
+                HTML
+              </button>
+              <button
+                type="button"
+                onClick={onNewJournal}
+                className="min-h-[44px] px-4 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-sm flex items-center gap-1.5 shadow-xs cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                Nouveau journal
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Temporary Reader Banner */}
