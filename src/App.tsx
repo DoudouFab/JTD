@@ -80,12 +80,22 @@ function isGoogleAccount(u: User): boolean {
 
 function formatActionError(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) {
+    const low = err.message.toLowerCase();
     if (
-      err.message.toLowerCase().includes('quota') ||
-      err.message.toLowerCase().includes('réserv') ||
-      err.message.toLowerCase().includes('révoqu')
+      low.includes('quota') ||
+      low.includes('réserv') ||
+      low.includes('révoqu')
     ) {
       return err.message;
+    }
+    if (
+      low.includes('permission-denied') ||
+      low.includes('missing or insufficient permissions')
+    ) {
+      return `${fallback} (Accès Firestore refusé — vérifiez votre connexion ou les règles de sécurité.)`;
+    }
+    if (low.includes('offline') || low.includes('unavailable')) {
+      return `${fallback} (Appareil hors-ligne ou serveur momentanément indisponible.)`;
     }
   }
   return fallback;

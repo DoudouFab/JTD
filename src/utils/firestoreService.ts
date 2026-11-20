@@ -933,16 +933,14 @@ export async function saveChantierCloud(
 ): Promise<Chantier> {
   const id = sanitizeDocId(chantier.id);
   const ref = doc(db, 'chantiers', id);
+  const ownerName =
+    chantier.ownerName ||
+    user.displayName ||
+    user.email?.split('@')[0] ||
+    'Utilisateur';
 
   try {
-    const snap = await getDoc(ref);
-    const ownerName =
-      chantier.ownerName ||
-      user.displayName ||
-      user.email?.split('@')[0] ||
-      'Utilisateur';
-
-    if (!snap.exists()) {
+    if (!chantier.ownerId) {
       const payload = sanitizeChantierPayload(
         { ...chantier, id },
         user.uid,
@@ -960,7 +958,6 @@ export async function saveChantierCloud(
       };
     }
 
-    const existingData = snap.data() as Chantier;
     const updateFields: Record<string, unknown> = {
       numero: clampStr(chantier.numero, 100),
       projet: clampStr(chantier.projet, 250),
@@ -975,16 +972,37 @@ export async function saveChantierCloud(
       updatedAt: serverTimestamp(),
     };
 
-    await updateDoc(ref, updateFields);
-
-    return {
-      ...chantier,
-      id,
-      ownerId: existingData.ownerId,
-      ownerName: existingData.ownerName,
-      visibility: 'private',
-      readerIds: existingData.readerIds || [],
-    };
+    try {
+      await updateDoc(ref, updateFields);
+      return {
+        ...chantier,
+        id,
+        ownerId: chantier.ownerId,
+        ownerName,
+        visibility: 'private',
+        readerIds: chantier.readerIds || [],
+      };
+    } catch (updateErr) {
+      const code = (updateErr as { code?: string })?.code || '';
+      if (code === 'not-found') {
+        const payload = sanitizeChantierPayload(
+          { ...chantier, id },
+          user.uid,
+          ownerName,
+          true
+        );
+        await setDoc(ref, payload);
+        return {
+          ...chantier,
+          id,
+          ownerId: user.uid,
+          ownerName,
+          visibility: 'private',
+          readerIds: payload.readerIds,
+        };
+      }
+      throw updateErr;
+    }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `chantiers/${id}`);
   }

@@ -509,7 +509,8 @@ service cloud.firestore {
     match /chantierShares/{shareId} {
       allow get: if isVerifiedActive()
         && isValidShareDocId(shareId)
-        && (existing().chantierOwnerId == request.auth.uid || existing().readerUid == request.auth.uid);
+        && ((resource == null && shareId.matches('^.+_' + request.auth.uid + '$'))
+            || (resource != null && (existing().chantierOwnerId == request.auth.uid || existing().readerUid == request.auth.uid)));
 
       allow list: if isVerifiedUser()
         && (resource.data.chantierOwnerId == request.auth.uid || resource.data.readerUid == request.auth.uid);
@@ -566,7 +567,7 @@ service cloud.firestore {
     match /chantiers/{chantierId} {
       allow get: if isVerifiedActive()
         && isValidId(chantierId)
-        && (existing().ownerId == request.auth.uid || hasActiveShare(chantierId));
+        && (resource == null || existing().ownerId == request.auth.uid || hasActiveShare(chantierId));
 
       allow list: if isVerifiedUser()
         && (resource.data.ownerId == request.auth.uid
