@@ -136,8 +136,10 @@ export function ChantierModal({
       }
       setErrorMsg(null);
       onNotify(
-        `Fichier importé (${parsed.postes.length} poste(s) de bordereau).`,
-        'success'
+        parsed.filledCount > 0
+          ? `${parsed.filledCount} info(s) chantier reprise(s) · ${parsed.postes.length} poste(s) de bordereau.`
+          : `Aucune info chantier détectée · ${parsed.postes.length} poste(s) de bordereau.`,
+        parsed.filledCount > 0 ? 'success' : 'default'
       );
     } catch (err) {
       const msg =
@@ -236,11 +238,13 @@ export function ChantierModal({
               </div>
               <div>
                 <div className="text-sm font-bold text-slate-900">
-                  Importer un fichier Excel (.xlsx)
+                  Importer un fichier Excel 3P (.xlsx)
                 </div>
                 <div className="text-xs text-slate-600 mt-0.5">
-                  Lit l&apos;onglet <span className="font-semibold">Aperçu</span> et
-                  charge les postes du bordereau pour l&apos;autocomplétion.
+                  Lit automatiquement l&apos;onglet{' '}
+                  <span className="font-semibold">Aperçu</span> (chantier,
+                  références, projet, adjudicataire, adresses, surveillant) et
+                  les postes du bordereau.
                 </div>
               </div>
             </div>
