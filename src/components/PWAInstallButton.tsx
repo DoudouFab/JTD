@@ -38,7 +38,7 @@ export function PWAInstallButton({ variant = 'header' }: PWAInstallButtonProps) 
         type="button"
         onClick={() => void handleClick()}
         className={buttonClass}
-        title="Installer Mes JTD sur l'écran d'accueil"
+        title="Installer Mes JDT sur l'écran d'accueil"
       >
         <Download className="w-3.5 h-3.5 shrink-0" />
         <span className={variant === 'header' ? 'hidden sm:inline' : ''}>
@@ -60,10 +60,10 @@ export function PWAInstallButton({ variant = 'header' }: PWAInstallButtonProps) 
                 <AppLogo className="w-11 h-11 rounded-xl shrink-0 shadow-xs" />
                 <div>
                   <h3 className="text-base font-extrabold text-slate-900">
-                    Installer Mes JTD
+                    Installer Mes JDT
                   </h3>
                   <p className="text-xs text-slate-500">
-                    Raccourci « Mes JTD » sur votre écran d&apos;accueil
+                    Raccourci « Mes JDT » sur votre écran d&apos;accueil
                   </p>
                 </div>
               </div>
@@ -100,7 +100,7 @@ export function PWAInstallButton({ variant = 'header' }: PWAInstallButtonProps) 
                 <li className="flex items-start gap-2">
                   <span className="font-bold text-[#0a5b9c]">3.</span>
                   <span>
-                    Confirmez le nom <strong>Mes JTD</strong> puis appuyez sur{' '}
+                    Confirmez le nom <strong>Mes JDT</strong> puis appuyez sur{' '}
                     <strong>Ajouter</strong>.
                   </span>
                 </li>
@@ -114,7 +114,7 @@ export function PWAInstallButton({ variant = 'header' }: PWAInstallButtonProps) 
                 <p className="leading-relaxed">
                   Ouvrez le menu <strong>⋮</strong> du navigateur et sélectionnez{' '}
                   <strong>Ajouter à l&apos;écran d&apos;accueil</strong> ou{' '}
-                  <strong>Installer l&apos;application Mes JTD</strong>.
+                  <strong>Installer l&apos;application Mes JDT</strong>.
                 </p>
               </div>
             )}

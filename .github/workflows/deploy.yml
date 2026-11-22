@@ -1,4 +1,4 @@
-name: Deploy Mes JTD to GitHub Pages
+name: Deploy Mes JDT to GitHub Pages
 
 on:
   push:

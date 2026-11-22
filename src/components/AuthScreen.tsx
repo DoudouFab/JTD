@@ -232,7 +232,7 @@ export function AuthScreen({
             <AppLogo className="w-11 h-11 rounded-xl shrink-0 shadow-xs" />
             <div>
               <h1 className="text-lg font-extrabold tracking-tight leading-tight">
-                Mes JTD
+                Mes JDT
               </h1>
               <p className="text-xs text-white/80 mt-0.5">
                 Journal des travaux · INASEP
@@ -556,7 +556,7 @@ export function AuthScreen({
       </div>
 
       <footer className="text-center text-xs text-slate-500 mt-6">
-        Mes JTD · INASEP · <strong>{APP_SIGNATURE}</strong>
+        Mes JDT · INASEP · <strong>{APP_SIGNATURE}</strong>
       </footer>
     </div>
   );

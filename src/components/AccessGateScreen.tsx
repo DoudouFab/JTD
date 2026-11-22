@@ -104,7 +104,7 @@ export function AccessGateScreen({
             <AppLogo className="w-10 h-10 rounded-xl shrink-0" />
             <div className="min-w-0">
               <div className="text-base font-extrabold leading-tight truncate">
-                Mes JTD
+                Mes JDT
               </div>
               <div className="text-xs text-white/80 truncate">{user.email}</div>
             </div>
@@ -343,7 +343,7 @@ export function AccessGateScreen({
       </div>
 
       <footer className="text-center text-xs text-slate-500 mt-6">
-        Mes JTD · INASEP · <strong>{APP_SIGNATURE}</strong>
+        Mes JDT · INASEP · <strong>{APP_SIGNATURE}</strong>
       </footer>
     </div>
   );

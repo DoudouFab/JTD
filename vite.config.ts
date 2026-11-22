@@ -21,10 +21,10 @@ export default defineConfig(() => {
         ],
         manifest: {
           id: './',
-          name: 'Mes JTD',
-          short_name: 'Mes JTD',
+          name: 'Mes JDT',
+          short_name: 'Mes JDT',
           description:
-            'Mes JTD — Journal des travaux quotidien et hebdomadaire avec signature et export PDF A4.',
+            'Mes JDT — Journal des travaux quotidien et hebdomadaire avec signature et export PDF A4.',
           theme_color: '#0a5b9c',
           background_color: '#f4f6f9',
           display: 'standalone',

@@ -8,15 +8,15 @@ export function AppLogo({ className = 'w-9 h-9' }: AppLogoProps) {
       xmlns="http://www.w3.org/2000/svg"
       viewBox="0 0 512 512"
       role="img"
-      aria-label="Logo Mes JTD"
+      aria-label="Logo Mes JDT"
       className={className}
     >
       <defs>
-        <linearGradient id="mes-jtd-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+        <linearGradient id="mes-jdt-bg" x1="0%" y1="0%" x2="100%" y2="100%">
           <stop offset="0%" stopColor="#0d6ebd" />
           <stop offset="100%" stopColor="#053d73" />
         </linearGradient>
-        <linearGradient id="mes-jtd-check" x1="0%" y1="0%" x2="100%" y2="100%">
+        <linearGradient id="mes-jdt-check" x1="0%" y1="0%" x2="100%" y2="100%">
           <stop offset="0%" stopColor="#38bdf8" />
           <stop offset="100%" stopColor="#0ea5e9" />
         </linearGradient>
@@ -27,7 +27,7 @@ export function AppLogo({ className = 'w-9 h-9' }: AppLogoProps) {
         width="512"
         height="512"
         rx="112"
-        fill="url(#mes-jtd-bg)"
+        fill="url(#mes-jdt-bg)"
       />
       <rect x="122" y="102" width="268" height="346" rx="28" fill="#ffffff" />
       <rect x="182" y="92" width="148" height="56" rx="16" fill="#064e8c" />
@@ -37,7 +37,7 @@ export function AppLogo({ className = 'w-9 h-9' }: AppLogoProps) {
       <path
         d="M196 244 L238 286 L326 196"
         fill="none"
-        stroke="url(#mes-jtd-check)"
+        stroke="url(#mes-jdt-check)"
         strokeWidth="34"
         strokeLinecap="square"
         strokeLinejoin="miter"
@@ -52,7 +52,7 @@ export function AppLogo({ className = 'w-9 h-9' }: AppLogoProps) {
         letterSpacing="4"
         fill="#064e8c"
       >
-        JTD
+        JDT
       </text>
     </svg>
   );

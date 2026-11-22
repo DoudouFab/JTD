@@ -480,12 +480,12 @@ export function AccountView({
           </div>
           <div>
             <h2 className="text-sm font-bold text-slate-900">
-              Application mobile &amp; raccourci « Mes JTD »
+              Application mobile &amp; raccourci « Mes JDT »
             </h2>
             <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">
               {isInstalled
-                ? 'Mes JTD est installée sur cet appareil. Vos chantiers et journaux restent synchronisés sur toutes vos plateformes (PC, smartphone, tablette).'
-                : 'Installez Mes JTD sur votre téléphone ou ordinateur pour obtenir l’icône dédiée « Mes JTD » et retrouver vos derniers JTD à jour sur n’importe quel appareil.'}
+                ? 'Mes JDT est installée sur cet appareil. Vos chantiers et journaux restent synchronisés sur toutes vos plateformes (PC, smartphone, tablette).'
+                : 'Installez Mes JDT sur votre téléphone ou ordinateur pour obtenir l’icône dédiée « Mes JDT » et retrouver vos derniers JDT à jour sur n’importe quel appareil.'}
             </p>
           </div>
         </div>

@@ -1303,7 +1303,7 @@ export default function App() {
               <AppLogo className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl shrink-0 shadow-xs" />
               <div className="min-w-0">
                 <div className="text-sm sm:text-base font-extrabold tracking-tight leading-tight truncate">
-                  Mes JTD
+                  Mes JDT
                 </div>
                 <div className="text-[11px] text-white/75 truncate">
                   Journal des travaux · INASEP
@@ -1527,7 +1527,7 @@ export default function App() {
 
         {/* Subtle Signed Footer */}
         <footer className="py-4 px-4 text-center text-xs text-slate-400">
-          Mes JTD · INASEP · {APP_SIGNATURE}
+          Mes JDT · INASEP · {APP_SIGNATURE}
         </footer>
       </div>
 
