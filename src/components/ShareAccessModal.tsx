@@ -179,10 +179,12 @@ export function ShareAccessModal({
               Accorder un nouvel accès temporaire
             </div>
             <p className="text-xs text-slate-500 leading-relaxed">
-              Le destinataire (compte approuvé) pourra consulter les pages
-              terminées, la page en cours et les semaines terminées de ce
-              dossier uniquement, signer via itsme®/eID et télécharger le PDF
-              une fois la semaine entièrement signée.
+              Le destinataire (compte autorisé dans l&apos;onglet Accès) pourra
+              consulter à tout moment les jours <strong>En cours</strong> et{' '}
+              <strong>Terminés</strong> de ce chantier uniquement, signer via{' '}
+              <strong>itsme®/eID</strong> les pages terminées (ce qui les
+              verrouille en modification), puis télécharger le PDF hebdomadaire
+              une fois signé par les deux parties.
             </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

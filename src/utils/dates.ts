@@ -12,6 +12,21 @@ export function fmtDateFR(iso?: string): string {
   return `${d}/${m}/${y}`;
 }
 
+export function fmtDateShortDash(iso?: string): string {
+  if (!iso) return '';
+  const [y, m, d] = iso.split('-');
+  if (!y || !m || !d) return iso;
+  return `${d}-${m}-${y.slice(-2)}`;
+}
+
+export function fmtHourFR(time?: string): string {
+  if (!time) return '';
+  const trimmed = time.trim();
+  const match = /^0?(\d{1,2}):(\d{2})$/.exec(trimmed);
+  if (!match) return trimmed;
+  return `${match[1]}h${match[2]}`;
+}
+
 const DAYS_FR = [
   'Dimanche',
   'Lundi',

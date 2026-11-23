@@ -141,7 +141,10 @@ export function ChantierDetailView({
                 <span>· Réf. {chantier.references}</span>
               ) : null}
               <span>
-                · {isOwner ? 'Dossier personnel' : 'Accès lecture temporaire'}
+                ·{' '}
+                {isOwner
+                  ? 'Dossier personnel'
+                  : 'Accès lecture & signature'}
               </span>
             </div>
             {allChantiers.length > 1 ? (
@@ -187,18 +190,22 @@ export function ChantierDetailView({
                 type="button"
                 onClick={onEditChantier}
                 className="min-h-[44px] px-3.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-sm flex items-center gap-1.5 cursor-pointer"
+                title="Modifier le chantier et gérer les e-mails de partage (0 à 3)"
               >
                 <Pencil className="w-4 h-4" />
                 Modifier
+                {(chantier.readerEmails?.length || 0) > 0
+                  ? ` (${chantier.readerEmails!.length} e-mail${chantier.readerEmails!.length > 1 ? 's' : ''})`
+                  : ''}
               </button>
               <button
                 type="button"
                 onClick={onOpenShareAccess}
                 className="min-h-[44px] px-3.5 rounded-xl border border-[#0a5b9c]/35 bg-[#0a5b9c]/[0.06] hover:bg-[#0a5b9c]/10 text-[#0a5b9c] font-semibold text-sm flex items-center gap-1.5 cursor-pointer"
-                title="Accorder un accès temporaire en lecture sur ce dossier"
+                title="Accorder un accès temporaire par code sur ce dossier"
               >
                 <Clock className="w-4 h-4" />
-                Accès temporaire
+                Code temporaire
                 {(chantier.readerIds?.length || 0) > 0
                   ? ` (${chantier.readerIds!.length})`
                   : ''}
@@ -225,18 +232,20 @@ export function ChantierDetailView({
         </div>
       </div>
 
-      {/* Temporary Reader Banner */}
+      {/* Reader Banner */}
       {!isOwner && (
         <div className="rounded-2xl border border-amber-200 bg-amber-50/80 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
           <div className="flex items-start gap-3">
             <Lock className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
             <div className="text-xs text-amber-950 leading-relaxed">
-              <strong>Consultation en lecture temporaire</strong> (dossier
-              spécifique uniquement) : vous pouvez consulter les pages
-              journalières terminées, la page en cours et les semaines
-              terminées, signer chaque page d&apos;une semaine terminée via{' '}
-              <strong>itsme® / eID</strong>, puis télécharger le PDF complet une
-              fois toutes les pages signées par le contrôleur et vous-même.
+              <strong>Consultation en lecture seule &amp; signature</strong>{' '}
+              (ce dossier uniquement) : vous pouvez consulter à tout moment les
+              pages <strong>En cours</strong> et les pages{' '}
+              <strong>Terminées</strong>, et signer (via{' '}
+              <strong>itsme® / eID</strong>) uniquement les pages marquées{' '}
+              <strong>Page terminée</strong>. Une fois signée par un membre, la
+              page n&apos;est plus modifiable. Le PDF complet de la semaine est
+              téléchargeable une fois signé par les deux parties.
             </div>
           </div>
           {shareInfo && (
@@ -401,13 +410,13 @@ export function ChantierDetailView({
               allCompleted && signedReaderCount === fullWeekJournals.length;
             const allFullySigned = allSignedCtrl && allSignedReader;
 
-            const myUnsignedInWeek = allCompleted
-              ? fullWeekJournals.filter((j) =>
-                  currentRole === 'controleur'
-                    ? !j.signatureControleur
-                    : !j.signatureLecteur
-                )
-              : [];
+            const completedUnsignedInWeek = fullWeekJournals.filter(
+              (j) =>
+                j.status === 'completed' &&
+                (currentRole === 'controleur'
+                  ? !j.signatureControleur
+                  : !j.signatureLecteur)
+            );
 
             return (
               <section
@@ -431,7 +440,7 @@ export function ChantierDetailView({
                         }`}
                       >
                         {allFullySigned
-                          ? 'Semaine signée (Contrôleur + Lecteur)'
+                          ? 'Semaine signée — Prête à classer'
                           : allCompleted
                             ? 'Semaine terminée — Signatures requises'
                             : `Semaine en cours (${completedCount}/${fullWeekJournals.length} terminée(s))`}
@@ -440,19 +449,19 @@ export function ChantierDetailView({
                     <div className="text-xs text-slate-500 tabular-nums mt-1">
                       {fullWeekJournals.length} page
                       {fullWeekJournals.length > 1 ? 's' : ''}
-                      {allCompleted
-                        ? ` · Contrôleur ${signedCtrlCount}/${fullWeekJournals.length} · Lecteur ${signedReaderCount}/${fullWeekJournals.length}`
+                      {completedCount > 0
+                        ? ` · Contrôleur ${signedCtrlCount}/${fullWeekJournals.length} · Entrepreneur/Lecteur ${signedReaderCount}/${fullWeekJournals.length}`
                         : ''}
                     </div>
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
-                    {allCompleted && myUnsignedInWeek.length > 0 && (
+                    {completedUnsignedInWeek.length > 0 && (
                       <button
                         type="button"
                         onClick={() =>
                           onSignJournals(
-                            myUnsignedInWeek,
+                            completedUnsignedInWeek,
                             currentRole,
                             weekRangeLabel(wk)
                           )
@@ -460,7 +469,9 @@ export function ChantierDetailView({
                         className="min-h-[40px] px-3.5 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-xs sm:text-sm flex items-center gap-1.5 cursor-pointer"
                       >
                         <ShieldCheck className="w-4 h-4" />
-                        Signer la semaine ({myUnsignedInWeek.length}p · itsme®/eID)
+                        {allCompleted
+                          ? `Signer la semaine (${completedUnsignedInWeek.length}p · itsme®/eID)`
+                          : `Signer terminées (${completedUnsignedInWeek.length}p · itsme®/eID)`}
                       </button>
                     )}
 
@@ -519,7 +530,7 @@ export function ChantierDetailView({
                     const isSignedReader = Boolean(j.signatureLecteur);
                     const isSignedAny = isSignedCtrl || isSignedReader;
                     const needsMySignature =
-                      allCompleted &&
+                      isPageCompleted &&
                       (currentRole === 'controleur'
                         ? !isSignedCtrl
                         : !isSignedReader);
@@ -547,6 +558,12 @@ export function ChantierDetailView({
                             >
                               {isPageCompleted ? 'Page terminée' : 'En cours'}
                             </span>
+                            {isSignedAny && (
+                              <span className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200 inline-flex items-center gap-1">
+                                <Lock className="w-3 h-3 text-slate-500" />
+                                Verrouillée
+                              </span>
+                            )}
                             <span className="text-xs text-slate-500 inline-flex items-center gap-1 tabular-nums">
                               <Users className="w-3.5 h-3.5 text-slate-400" />
                               {totalOuv} ouvrier{totalOuv > 1 ? 's' : ''}

@@ -26,6 +26,7 @@ import { Toast, type ToastState } from './components/Toast';
 import { auth, isAdminEmail } from './firebase';
 import {
   APP_SIGNATURE,
+  STANDARD_TRAVAUX_PRESETS,
   type Chantier,
   type ChantierShare,
   type DB,
@@ -37,10 +38,10 @@ import {
   buildWeeklyFilename,
   fmtDateFR,
   todayISO,
-  weekKey,
 } from './utils/dates';
 import {
   buildLocalDefaultProfile,
+  checkDossierReaderStartup,
   checkUserAccessStartup,
   deleteChantierCloud,
   deleteJournalCloud,
@@ -107,7 +108,7 @@ export default function App() {
   const [, setAuthTick] = useState(0);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [accessState, setAccessState] = useState<
-    'approved' | AccessGateState | null
+    'approved' | 'reader_only' | AccessGateState | null
   >(null);
   const [accessErrorMessage, setAccessErrorMessage] = useState<string | null>(
     null
@@ -155,6 +156,22 @@ export default function App() {
       }
     }
   );
+
+  const [pendingChantierId, setPendingChantierId] = useState<string | null>(
+    () => {
+      try {
+        const param = new URLSearchParams(window.location.search).get(
+          'chantier'
+        );
+        return param ? param.trim() : null;
+      } catch {
+        return null;
+      }
+    }
+  );
+  const pendingChantierIdRef = useRef<string | null>(pendingChantierId);
+  pendingChantierIdRef.current = pendingChantierId;
+  const hasCloudChantiersSyncedRef = useRef(false);
 
   const [confirmState, setConfirmState] = useState<{
     title: string;
@@ -210,9 +227,32 @@ export default function App() {
     const pending = pendingSaveRef.current;
     if (pending) {
       pendingSaveRef.current = null;
-      await saveJournalCloud(pending.journal, pending.chantier, pending.user);
+      try {
+        await saveJournalCloud(pending.journal, pending.chantier, pending.user);
+      } catch (err) {
+        if (
+          err instanceof Error &&
+          err.message.includes('déjà été signée par un membre')
+        ) {
+          notify(err.message, 'error');
+          try {
+            const fresh = await fetchChantierJournauxOnce(
+              pending.chantier,
+              pending.user.uid,
+              pending.user.email
+            );
+            setChantierJournals(fresh);
+            const found = fresh.find((j) => j.id === pending.journal.id);
+            if (found) setEditingJournalDraft(found);
+          } catch {
+            // ignore refresh failure
+          }
+          return;
+        }
+        throw err;
+      }
     }
-  }, []);
+  }, [notify]);
 
   const evaluateUserAccess = useCallback(async (nextUser: User) => {
     const emailVerifiedOrGoogle =
@@ -233,14 +273,44 @@ export default function App() {
       return;
     }
 
-    // Colleague: 1 single getDocFromServer read at startup (with localStorage offline fallback)
+    // Colleague: 1 single getDocFromServer read at startup (with automatic dossier reader fallback)
     try {
       const res = await checkUserAccessStartup(nextUser);
+      if (res.state === 'approved') {
+        setAccessState('approved');
+        setAccessErrorMessage(null);
+        return;
+      }
+      if (res.state === 'revoked') {
+        setAccessState('revoked');
+        setAccessErrorMessage(null);
+        return;
+      }
+
+      const hasDossierAccess = await checkDossierReaderStartup(
+        nextUser,
+        pendingChantierIdRef.current
+      );
+      if (hasDossierAccess) {
+        setAccessState('reader_only');
+        setAccessErrorMessage(null);
+        return;
+      }
+
       setAccessState(res.state);
       setAccessErrorMessage(
         res.state === 'quota_exceeded' ? res.errorMessage : null
       );
     } catch (err) {
+      const hasCachedReader = await checkDossierReaderStartup(
+        nextUser,
+        pendingChantierIdRef.current
+      ).catch(() => false);
+      if (hasCachedReader) {
+        setAccessState('reader_only');
+        setAccessErrorMessage(null);
+        return;
+      }
       setAccessState('offline_unapproved');
       setAccessErrorMessage(
         err instanceof Error ? err.message : "Erreur lors de la vérification d'accès."
@@ -278,7 +348,13 @@ export default function App() {
     async (targetUser: User, silent = false) => {
       setRefreshingChantiers(true);
       try {
-        const res = await fetchChantiersAndSharesOnce(targetUser.uid);
+        const res = await fetchChantiersAndSharesOnce(
+          targetUser.uid,
+          targetUser.email
+        );
+        if (!res.fromCache) {
+          hasCloudChantiersSyncedRef.current = true;
+        }
         setChantiers(res.chantiers);
         setShareByChantierId(res.shareByChantierId);
         setChantiersLoaded(true);
@@ -314,9 +390,10 @@ export default function App() {
     const isAuthorized = Boolean(
       user &&
         (user.emailVerified || isGoogleAccount(user)) &&
-        (isAdmin || accessState === 'approved')
+        (isAdmin || accessState === 'approved' || accessState === 'reader_only')
     );
     if (!isAuthorized || !user) {
+      hasCloudChantiersSyncedRef.current = false;
       setChantiers([]);
       setShareByChantierId({});
       setChantierJournals([]);
@@ -343,7 +420,7 @@ export default function App() {
     const isAuthorized = Boolean(
       user &&
         (user.emailVerified || isGoogleAccount(user)) &&
-        (isAdmin || accessState === 'approved')
+        (isAdmin || accessState === 'approved' || accessState === 'reader_only')
     );
     if (!isAuthorized || !user) return;
 
@@ -362,7 +439,7 @@ export default function App() {
         if (currentChantierId) {
           const ch = chantiers.find((c) => c.id === currentChantierId);
           if (ch) {
-            void fetchChantierJournauxOnce(ch, user.uid)
+            void fetchChantierJournauxOnce(ch, user.uid, user.email)
               .then((list) => setChantierJournals(list))
               .catch(() => {});
           }
@@ -400,13 +477,13 @@ export default function App() {
     refreshChantiersFromCloud,
   ]);
 
-  // Redeem pending URL ?invite=CODE automatically once user is approved & logged in
+  // Redeem pending URL ?invite=CODE automatically once user is authorized & logged in
   useEffect(() => {
     if (
       !pendingInviteCode ||
       !user ||
       (!user.emailVerified && !isGoogleAccount(user)) ||
-      (!isAdmin && accessState !== 'approved')
+      (!isAdmin && accessState !== 'approved' && accessState !== 'reader_only')
     ) {
       return;
     }
@@ -451,6 +528,61 @@ export default function App() {
     refreshChantiersFromCloud,
   ]);
 
+  // Open pending URL ?chantier=ID automatically once chantiers are synced
+  useEffect(() => {
+    if (
+      !pendingChantierId ||
+      !user ||
+      (!user.emailVerified && !isGoogleAccount(user)) ||
+      (!isAdmin &&
+        accessState !== 'approved' &&
+        accessState !== 'reader_only') ||
+      !chantiersLoaded
+    ) {
+      return;
+    }
+
+    const found = chantiers.find((c) => c.id === pendingChantierId);
+    if (found) {
+      setPendingChantierId(null);
+      try {
+        const cleanedUrl = new URL(window.location.href);
+        cleanedUrl.searchParams.delete('chantier');
+        window.history.replaceState({}, '', cleanedUrl.toString());
+      } catch {
+        // ignore URL cleanup
+      }
+      setCurrentChantierId(found.id);
+      setCurrentJournalId(null);
+      setView('chantier');
+      return;
+    }
+
+    if (hasCloudChantiersSyncedRef.current && !refreshingChantiers) {
+      setPendingChantierId(null);
+      try {
+        const cleanedUrl = new URL(window.location.href);
+        cleanedUrl.searchParams.delete('chantier');
+        window.history.replaceState({}, '', cleanedUrl.toString());
+      } catch {
+        // ignore URL cleanup
+      }
+      notify(
+        `Ce dossier n'est pas partagé avec ${user.email || 'ce compte'}.`,
+        'error'
+      );
+    }
+  }, [
+    pendingChantierId,
+    user,
+    isAdmin,
+    accessState,
+    chantiersLoaded,
+    chantiers,
+    refreshingChantiers,
+    notify,
+  ]);
+
   const currentChantier = useMemo(
     () => chantiers.find((c) => c.id === currentChantierId) || null,
     [chantiers, currentChantierId]
@@ -476,7 +608,11 @@ export default function App() {
     async (chantier: Chantier, targetUser: User, silent = false) => {
       setRefreshingJournals(true);
       try {
-        const list = await fetchChantierJournauxOnce(chantier, targetUser.uid);
+        const list = await fetchChantierJournauxOnce(
+          chantier,
+          targetUser.uid,
+          targetUser.email
+        );
         setChantierJournals(list);
         if (!silent) {
           notify('Journaux actualisés.', 'success');
@@ -542,17 +678,6 @@ export default function App() {
     return chantierJournals.find((j) => j.id === currentJournalId) || null;
   }, [editingJournalDraft, chantierJournals, currentJournalId]);
 
-  const isCurrentJournalInCompletedWeek = useMemo(() => {
-    if (!currentJournal) return false;
-    const targetWk = weekKey(currentJournal.date);
-    const sameWeek = chantierJournals.filter(
-      (j) => weekKey(j.date) === targetWk
-    );
-    return (
-      sameWeek.length > 0 && sameWeek.every((j) => j.status === 'completed')
-    );
-  }, [chantierJournals, currentJournal]);
-
   const previousJournal = useMemo(() => {
     if (!currentJournal) return null;
     const others = chantierJournals
@@ -580,7 +705,7 @@ export default function App() {
   }, [chantiers, chantierJournals, currentChantier]);
 
   const travauxSuggestions = useMemo(() => {
-    const set = new Set<string>();
+    const set = new Set<string>(STANDARD_TRAVAUX_PRESETS);
     if (currentChantier) {
       (currentChantier.postes || []).forEach((p) => {
         if (p?.trim()) set.add(p.trim());
@@ -648,8 +773,11 @@ export default function App() {
   };
 
   // Chantier CRUD (keeps React state + localStorage cache synced)
-  const handleSaveChantier = async (chantier: Chantier) => {
-    if (!user) return;
+  const handleSaveChantier = async (
+    chantier: Chantier,
+    options?: { keepOpen?: boolean }
+  ): Promise<boolean> => {
+    if (!user) return false;
     try {
       const saved = await saveChantierCloud(chantier, user);
       setChantiers((prev) => {
@@ -665,17 +793,23 @@ export default function App() {
         });
         return next;
       });
-      setChantierModalOpen(false);
-      setEditingChantier(null);
+      if (options?.keepOpen) {
+        setEditingChantier(saved);
+      } else {
+        setChantierModalOpen(false);
+        setEditingChantier(null);
+      }
       if (view === 'chantier' && currentChantierId === saved.id) {
         setCurrentChantierId(saved.id);
       }
       notify('Chantier enregistré dans le cloud.', 'success');
+      return true;
     } catch (err) {
       notify(
         formatActionError(err, "Impossible d'enregistrer le chantier."),
         'error'
       );
+      return false;
     }
   };
 
@@ -747,6 +881,7 @@ export default function App() {
       chantierId: currentChantier.id,
       chantierOwnerId: currentChantier.ownerId || user.uid,
       chantierReaderIds: currentChantier.readerIds || [],
+      chantierReaderEmails: currentChantier.readerEmails || [],
       authorId: user.uid,
       authorName:
         profile?.displayName ||
@@ -804,6 +939,7 @@ export default function App() {
       id: uid(),
       chantierOwnerId: currentChantier.ownerId || user.uid,
       chantierReaderIds: currentChantier.readerIds || [],
+      chantierReaderEmails: currentChantier.readerEmails || [],
       authorId: user.uid,
       authorName:
         profile?.displayName ||
@@ -895,7 +1031,7 @@ export default function App() {
       window.clearTimeout(saveTimerRef.current);
     }
     saveTimerRef.current = window.setTimeout(() => {
-      void flushPendingJournalSave();
+      void flushPendingJournalSave().catch(() => {});
     }, 350);
   };
 
@@ -960,7 +1096,15 @@ export default function App() {
           currentChantier,
           j
         );
-        await signJournalPageCloud(currentChantier.id, j.id, role, sigRecord);
+        await signJournalPageCloud(
+          currentChantier.id,
+          j.id,
+          role,
+          sigRecord,
+          currentChantier,
+          j,
+          user
+        );
 
         updateJournalsAndCache(currentChantier.id, (prev) =>
           prev.map((item) =>
@@ -985,7 +1129,13 @@ export default function App() {
         'success'
       );
     },
-    [currentChantier, flushPendingJournalSave, notify, updateJournalsAndCache]
+    [
+      currentChantier,
+      flushPendingJournalSave,
+      notify,
+      updateJournalsAndCache,
+      user,
+    ]
   );
 
   const handleRequestSignJournals = async (
@@ -1142,7 +1292,7 @@ export default function App() {
     try {
       const allJournals: Journal[] = [];
       for (const ch of myChantiers) {
-        const list = await fetchChantierJournauxOnce(ch, user.uid);
+        const list = await fetchChantierJournauxOnce(ch, user.uid, user.email);
         allJournals.push(...list);
       }
       const payload: DB = { chantiers: myChantiers, journaux: allJournals };
@@ -1229,6 +1379,7 @@ export default function App() {
     return (
       <AuthScreen
         unverifiedUser={user && !isVerifiedOrGoogle ? user : null}
+        pendingChantierId={pendingChantierId}
         onVerifiedRefresh={async () => {
           if (!auth.currentUser) return false;
           await auth.currentUser.reload();
@@ -1248,7 +1399,7 @@ export default function App() {
   }
 
   // Gate 2: Colleague waiting for personal code / admin approval / revoked / offline / quota
-  if (!isAdmin && accessState !== 'approved') {
+  if (!isAdmin && accessState !== 'approved' && accessState !== 'reader_only') {
     if (!accessState) {
       return (
         <div className="min-h-screen bg-[#f4f6f9] flex items-center justify-center p-6">
@@ -1265,6 +1416,8 @@ export default function App() {
           user={user}
           gateState={accessState}
           errorMessage={accessErrorMessage}
+          pendingInviteCode={pendingInviteCode}
+          pendingChantierId={pendingChantierId}
           onActivated={() => {
             setAccessState('approved');
             setAccessErrorMessage(null);
@@ -1281,6 +1434,8 @@ export default function App() {
       </>
     );
   }
+
+  const isColleagueOrAdmin = isAdmin || accessState === 'approved';
 
   const effectiveProfile: UserProfile =
     profile || buildLocalDefaultProfile(user);
@@ -1397,6 +1552,7 @@ export default function App() {
               chantiers={chantiers}
               shareByChantierId={shareByChantierId}
               currentUserId={user.uid}
+              isColleagueOrAdmin={isColleagueOrAdmin}
               lastBackupIso={lastBackupIso}
               localMigrationCount={unmigratedLocalCount}
               migratingLocal={migratingLocal}
@@ -1483,7 +1639,6 @@ export default function App() {
               journal={currentJournal}
               previousJournal={previousJournal}
               isOwner={currentChantier.ownerId === user.uid}
-              isInCompletedWeek={isCurrentJournalInCompletedWeek}
               firmSuggestions={firmSuggestions}
               travauxSuggestions={travauxSuggestions}
               onChange={handleUpdateJournal}

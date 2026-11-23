@@ -7,8 +7,13 @@ import {
   Check,
   AlertCircle,
   Lock,
+  Mail,
+  Send,
+  Copy,
+  Plus,
 } from 'lucide-react';
-import type { Chantier } from '../types';
+import { STANDARD_TRAVAUX_PRESETS, type Chantier } from '../types';
+import { clampEmailList } from '../utils/firestoreService';
 import {
   DEFAULT_DAY_FOLDER_KEY,
   DEFAULT_WEEK_FOLDER_KEY,
@@ -27,9 +32,14 @@ interface ChantierModalProps {
   defaultHoraireDebut?: string;
   defaultHoraireFin?: string;
   onClose: () => void;
-  onSave: (chantier: Chantier) => void;
+  onSave: (
+    chantier: Chantier,
+    options?: { keepOpen?: boolean }
+  ) => Promise<boolean | void> | void;
   onNotify: (msg: string, tone?: 'default' | 'success' | 'error') => void;
 }
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export function ChantierModal({
   open,
@@ -52,6 +62,8 @@ export function ChantierModal({
   const [horaireFin, setHoraireFin] = useState('16:30');
   const [preposeSurveillance, setPreposeSurveillance] = useState('');
   const [postes, setPostes] = useState<string[]>([]);
+  const [readerEmails, setReaderEmails] = useState<string[]>([]);
+  const [savingBusy, setSavingBusy] = useState(false);
 
   const [dayFolderName, setDayFolderName] = useState<string | null>(null);
   const [weekFolderName, setWeekFolderName] = useState<string | null>(null);
@@ -82,7 +94,22 @@ export function ChantierModal({
     setPreposeSurveillance(
       editingChantier ? editingChantier.preposeSurveillance : defaultPrepose
     );
-    setPostes(editingChantier?.postes ? [...editingChantier.postes] : []);
+    setPostes(
+      editingChantier?.postes
+        ? Array.from(
+            new Set([
+              ...STANDARD_TRAVAUX_PRESETS,
+              ...editingChantier.postes.filter((p) => p?.trim()),
+            ])
+          )
+        : [...STANDARD_TRAVAUX_PRESETS]
+    );
+    setReaderEmails(
+      editingChantier?.readerEmails?.length
+        ? editingChantier.readerEmails.slice(0, 3)
+        : []
+    );
+    setSavingBusy(false);
     setErrorMsg(null);
 
     if (fsSupported) {
@@ -132,7 +159,11 @@ export function ChantierModal({
         setPreposeSurveillance(parsed.preposeSurveillance);
       }
       if (parsed.postes.length) {
-        setPostes(parsed.postes);
+        setPostes(
+          Array.from(new Set([...STANDARD_TRAVAUX_PRESETS, ...parsed.postes]))
+        );
+      } else if (!postes.length) {
+        setPostes([...STANDARD_TRAVAUX_PRESETS]);
       }
       setErrorMsg(null);
       onNotify(
@@ -175,19 +206,30 @@ export function ChantierModal({
     onNotify('Dossier dissocié.');
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const validateAndBuildChantier = (): Chantier | null => {
     if (!numero.trim() && !projet.trim()) {
       setErrorMsg('Indiquez au moins un numéro de chantier ou un nom de projet.');
-      return;
+      return null;
     }
 
-    onSave({
+    for (const raw of readerEmails) {
+      const trimmed = raw.trim().toLowerCase();
+      if (trimmed && !EMAIL_RE.test(trimmed)) {
+        setErrorMsg(
+          `Adresse e-mail de lecteur invalide : « ${raw.trim()} ». Corrigez-la ou supprimez la ligne.`
+        );
+        return null;
+      }
+    }
+
+    setErrorMsg(null);
+    return {
       id: draftId,
       ownerId: editingChantier?.ownerId,
       ownerName: editingChantier?.ownerName,
       visibility: 'private',
       readerIds: editingChantier?.readerIds || [],
+      readerEmails: clampEmailList(readerEmails, 3),
       numero: numero.trim(),
       projet: projet.trim(),
       entrepriseNom: entrepriseNom.trim(),
@@ -198,8 +240,96 @@ export function ChantierModal({
       horaireFin: horaireFin || '16:30',
       preposeSurveillance: preposeSurveillance.trim(),
       postes,
-    });
+    };
   };
+
+  const buildShareLink = (): string => {
+    try {
+      const url = new URL(window.location.origin + window.location.pathname);
+      url.searchParams.set('chantier', draftId);
+      return url.toString();
+    } catch {
+      return `${window.location.origin}/?chantier=${encodeURIComponent(draftId)}`;
+    }
+  };
+
+  const buildEmailContent = () => {
+    const refText = references.trim() || numero.trim() || draftId;
+    const titre =
+      [numero.trim(), projet.trim()].filter(Boolean).join(' — ') ||
+      'Journal des travaux';
+    const shareLink = buildShareLink();
+    const subject = `Accès Journal des travaux — ${titre} (Réf. ${refText})`;
+    const body = [
+      'Bonjour,',
+      '',
+      `Voici vos accès à la consultation de votre journal des travaux (référence : ${refText}${projet.trim() ? ` — ${projet.trim()}` : ''}) :`,
+      shareLink,
+      '',
+      'Connectez-vous avec cette adresse e-mail dans l’application (compte Google ou « E-mail pro » avec confirmation). Aucun code collègue supplémentaire n’est nécessaire : votre accès s’ouvrira automatiquement en lecture seule et signature pour ce dossier.',
+      '',
+      'Merci de bien vouloir consulter régulièrement et approuver les pages rédigées et terminées.',
+      '',
+      preposeSurveillance.trim()
+        ? `Bien à vous,\n${preposeSurveillance.trim()}`
+        : 'Bien à vous,',
+    ].join('\n');
+    return { subject, body, shareLink };
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const payload = validateAndBuildChantier();
+    if (!payload) return;
+    setSavingBusy(true);
+    try {
+      await onSave(payload);
+    } finally {
+      setSavingBusy(false);
+    }
+  };
+
+  const handleSaveAndSendMail = async () => {
+    const payload = validateAndBuildChantier();
+    if (!payload) return;
+    const emails = payload.readerEmails || [];
+    if (!emails.length) {
+      setErrorMsg(
+        'Encodez au moins une adresse e-mail ci-dessous pour envoyer les accès.'
+      );
+      return;
+    }
+
+    setSavingBusy(true);
+    try {
+      const savedOk = await onSave(payload, { keepOpen: true });
+      if (savedOk === false) return;
+
+      const { subject, body } = buildEmailContent();
+      const mailtoHref = `mailto:${encodeURIComponent(emails.join(','))}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+      window.location.href = mailtoHref;
+      onNotify(
+        `Chantier enregistré et e-mail préparé pour ${emails.join(', ')}.`,
+        'success'
+      );
+    } finally {
+      setSavingBusy(false);
+    }
+  };
+
+  const handleCopyEmailText = async () => {
+    const payload = validateAndBuildChantier();
+    if (!payload) return;
+    const { subject, body } = buildEmailContent();
+    try {
+      await navigator.clipboard.writeText(`Objet : ${subject}\n\n${body}`);
+      onNotify('Message d’accès et lien copiés dans le presse-papiers.', 'success');
+    } catch {
+      onNotify('Copie automatique impossible sur ce navigateur.', 'error');
+    }
+  };
+
+  const validEmailsCount = clampEmailList(readerEmails, 3).length;
 
   return (
     <div
@@ -271,16 +401,16 @@ export function ChantierModal({
               <span className="font-medium flex items-center gap-2">
                 <Check className="w-4 h-4 text-emerald-700 shrink-0" />
                 <span>
-                  <strong className="tabular-nums">{postes.length}</strong> poste(s)
-                  de bordereau prêts pour l&apos;autocomplétion (Section B)
+                  <strong className="tabular-nums">{postes.length}</strong> ligne(s)
+                  pré-encodées (mentions standard + postes 3P) prêtes pour la Section B
                 </span>
               </span>
               <button
                 type="button"
-                onClick={() => setPostes([])}
+                onClick={() => setPostes([...STANDARD_TRAVAUX_PRESETS])}
                 className="text-emerald-800 hover:text-red-700 font-semibold underline cursor-pointer ml-3"
               >
-                Effacer
+                Réinitialiser 3P
               </button>
             </div>
           )}
@@ -297,9 +427,11 @@ export function ChantierModal({
             <Lock className="w-4 h-4 text-[#0a5b9c] shrink-0 mt-0.5" />
             <div className="text-xs text-slate-600 leading-relaxed">
               <strong className="text-slate-900">Chantier personnel (privé)</strong> :
-              vous seul pouvez rédiger et consulter ces journaux. Pour partager
-              temporairement ce dossier en lecture, utilisez{' '}
-              <strong>« Accès temporaire »</strong> sur la fiche du chantier.
+              vous seul pouvez rédiger ces journaux. Pour accorder un{' '}
+              <strong>accès automatique en lecture seule &amp; signature</strong>{' '}
+              à l&apos;entrepreneur ou au maître d&apos;ouvrage sur{' '}
+              <strong>ce dossier uniquement</strong>, encodez 0 à 3 adresses
+              e-mail ci-dessous.
             </div>
           </div>
 
@@ -338,6 +470,8 @@ export function ChantierModal({
             </label>
             <input
               type="text"
+              lang="fr"
+              spellCheck={true}
               value={projet}
               onChange={(e) => setProjet(e.target.value)}
               placeholder="ex. Égouttage Rue de la Station"
@@ -352,6 +486,8 @@ export function ChantierModal({
               </label>
               <input
                 type="text"
+                lang="fr"
+                spellCheck={true}
                 value={entrepriseNom}
                 onChange={(e) => setEntrepriseNom(e.target.value)}
                 placeholder="Nom de la firme"
@@ -380,6 +516,8 @@ export function ChantierModal({
               </label>
               <textarea
                 rows={2}
+                lang="fr"
+                spellCheck={true}
                 value={entrepriseAdresse}
                 onChange={(e) => setEntrepriseAdresse(e.target.value)}
                 placeholder="Rue, CP, Localité"
@@ -393,6 +531,8 @@ export function ChantierModal({
               </label>
               <textarea
                 rows={2}
+                lang="fr"
+                spellCheck={true}
                 value={adresseChantier}
                 onChange={(e) => setAdresseChantier(e.target.value)}
                 placeholder="Rue, Commune"
@@ -510,6 +650,112 @@ export function ChantierModal({
             )}
           </div>
 
+          {/* Single-dossier Email Reader & Signer Sharing (0 to 3 emails) */}
+          <div className="rounded-xl border border-[#0a5b9c]/25 bg-[#0a5b9c]/[0.03] p-4 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-start gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-[#0a5b9c]/10 text-[#0a5b9c] flex items-center justify-center shrink-0 mt-0.5">
+                  <Mail className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-wide text-slate-800">
+                    Partage lecture seule &amp; signature (0 à 3 e-mails)
+                  </div>
+                  <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
+                    Une fois encodées et enregistrées, ces adresses accèdent
+                    automatiquement à <strong>ce chantier uniquement</strong>{' '}
+                    (consultation à tout moment des pages En cours &amp;
+                    Terminées, signature itsme® / eID des pages terminées).
+                  </p>
+                </div>
+              </div>
+              {readerEmails.length < 3 && (
+                <button
+                  type="button"
+                  onClick={() => setReaderEmails((prev) => [...prev, ''])}
+                  className="min-h-[38px] px-3 rounded-xl border border-[#0a5b9c]/40 bg-white hover:bg-[#0a5b9c]/5 text-[#0a5b9c] text-xs font-semibold flex items-center gap-1.5 cursor-pointer shrink-0 self-start sm:self-center"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Ajouter ({readerEmails.length}/3)
+                </button>
+              )}
+            </div>
+
+            {readerEmails.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-slate-200 bg-white px-3.5 py-3 text-xs text-slate-500">
+                Aucune adresse e-mail encodée (0/3). Cliquez sur{' '}
+                <strong>« Ajouter »</strong> pour inviter l&apos;entrepreneur ou
+                un destinataire à consulter et signer ce dossier.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {readerEmails.map((em, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <input
+                      type="email"
+                      value={em}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setReaderEmails((prev) =>
+                          prev.map((item, i) => (i === idx ? val : item))
+                        );
+                      }}
+                      placeholder={`Destinataire ${idx + 1} (ex. conducteur@entreprise.be)`}
+                      className="flex-1 min-h-[42px] px-3.5 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 focus:outline-none focus:border-[#0a5b9c] focus:ring-2 focus:ring-[#0a5b9c]/15"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setReaderEmails((prev) =>
+                          prev.filter((_, i) => i !== idx)
+                        )
+                      }
+                      className="min-h-[42px] min-w-[42px] flex items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-400 hover:text-red-600 hover:border-red-200 cursor-pointer shrink-0"
+                      title="Retirer cette adresse"
+                      aria-label="Retirer cette adresse"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {validEmailsCount > 0 && (
+              <div className="pt-1 space-y-2.5">
+                <div className="rounded-xl border border-slate-200 bg-white p-3 text-[11px] text-slate-600 leading-relaxed whitespace-pre-line">
+                  <div className="font-bold text-slate-800 mb-1">
+                    Aperçu du message d&apos;invitation :
+                  </div>
+                  {`Voici vos accès à la consultation de votre journal des travaux (référence : ${references.trim() || numero.trim() || draftId}${projet.trim() ? ` — ${projet.trim()}` : ''}) :\n${buildShareLink()}\n\nMerci de bien vouloir consulter régulièrement et approuver les pages rédigées et terminées.`}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={savingBusy}
+                    onClick={() => void handleSaveAndSendMail()}
+                    className="min-h-[42px] px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-semibold flex items-center gap-2 cursor-pointer disabled:opacity-60"
+                  >
+                    <Send className="w-4 h-4" />
+                    {savingBusy
+                      ? 'Enregistrement…'
+                      : `Enregistrer et envoyer par e-mail (${validEmailsCount})`}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyEmailText()}
+                    className="min-h-[42px] px-3.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    Copier message &amp; lien
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
           <div className="pt-2 flex flex-col-reverse sm:flex-row sm:justify-end gap-2.5">
             <button
               type="button"
@@ -520,9 +766,14 @@ export function ChantierModal({
             </button>
             <button
               type="submit"
-              className="min-h-[44px] px-5 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-sm cursor-pointer"
+              disabled={savingBusy}
+              className="min-h-[44px] px-5 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-sm cursor-pointer disabled:opacity-60"
             >
-              {editingChantier ? 'Enregistrer' : 'Créer le chantier'}
+              {savingBusy
+                ? 'Enregistrement…'
+                : editingChantier
+                  ? 'Enregistrer'
+                  : 'Créer le chantier'}
             </button>
           </div>
         </form>

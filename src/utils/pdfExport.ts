@@ -6,6 +6,10 @@ import { createRoot } from 'react-dom/client';
 import { A4JournalSheet } from '../components/A4JournalSheet';
 import type { Chantier, Journal } from '../types';
 import { fmtDateFR } from './dates';
+import {
+  formatSignatureMethodLabel,
+  verifyJournalSignatureRecord,
+} from './signatureCrypto';
 import { deliverFile } from './storage';
 
 export interface PdfProgress {
@@ -97,64 +101,111 @@ export async function generateAndDeliverPdf(
       pdf.addImage(img, 'JPEG', 0, 0, w, h, undefined, 'FAST');
     }
 
-    // Embed authentication & signature metadata inside PDF /Info & XMP stream
-    const authRecords = journals.map((j) => ({
-      journalId: j.id,
-      journalNum: j.journalNum,
-      date: j.date,
-      status: j.status || 'in_progress',
-      controleur: j.signatureControleur
-        ? {
-            method: j.signatureControleur.method,
-            signerUid: j.signatureControleur.signerUid,
-            signerName: j.signatureControleur.signerName,
-            signerEmail: j.signatureControleur.signerEmail,
-            verificationId: j.signatureControleur.verificationId,
-            verifiedAt: j.signatureControleur.verifiedAt,
-            signedAt: j.signatureControleur.signedAt,
-            documentSha256: j.signatureControleur.documentSha256,
-            cryptoDigest: j.signatureControleur.cryptoDigest,
-            webAuthnUsed: j.signatureControleur.webAuthnUsed,
-            nationalIdHash: j.signatureControleur.nationalIdHash,
-          }
-        : null,
-      lecteur: j.signatureLecteur
-        ? {
-            method: j.signatureLecteur.method,
-            signerUid: j.signatureLecteur.signerUid,
-            signerName: j.signatureLecteur.signerName,
-            signerEmail: j.signatureLecteur.signerEmail,
-            verificationId: j.signatureLecteur.verificationId,
-            verifiedAt: j.signatureLecteur.verifiedAt,
-            signedAt: j.signatureLecteur.signedAt,
-            documentSha256: j.signatureLecteur.documentSha256,
-            cryptoDigest: j.signatureLecteur.cryptoDigest,
-            webAuthnUsed: j.signatureLecteur.webAuthnUsed,
-            nationalIdHash: j.signatureLecteur.nationalIdHash,
-          }
-        : null,
-    }));
+    // Verify & embed authentication & signature metadata inside PDF /Info & XMP stream
+    const authRecords = await Promise.all(
+      journals.map(async (j) => {
+        const ctrlVerify = j.signatureControleur
+          ? await verifyJournalSignatureRecord(chantier, j, j.signatureControleur)
+          : null;
+        const lectVerify = j.signatureLecteur
+          ? await verifyJournalSignatureRecord(chantier, j, j.signatureLecteur)
+          : null;
 
-    const uniqueSigners = Array.from(
+        return {
+          journalId: j.id,
+          journalNum: j.journalNum,
+          date: j.date,
+          status: j.status || 'in_progress',
+          controleur: j.signatureControleur
+            ? {
+                role: 'controleur' as const,
+                method: j.signatureControleur.method,
+                methodLabel: formatSignatureMethodLabel(j.signatureControleur.method),
+                signerUid: j.signatureControleur.signerUid,
+                signerName: j.signatureControleur.signerName,
+                signerEmail: j.signatureControleur.signerEmail,
+                verificationId: j.signatureControleur.verificationId,
+                verifiedAt: j.signatureControleur.verifiedAt,
+                signedAt: j.signatureControleur.signedAt,
+                documentSha256: j.signatureControleur.documentSha256,
+                cryptoDigest: j.signatureControleur.cryptoDigest,
+                webAuthnUsed: j.signatureControleur.webAuthnUsed,
+                nationalIdHash: j.signatureControleur.nationalIdHash,
+                integrityVerifiedAtExport: ctrlVerify?.valid ?? false,
+              }
+            : null,
+          lecteur: j.signatureLecteur
+            ? {
+                role: 'lecteur' as const,
+                method: j.signatureLecteur.method,
+                methodLabel: formatSignatureMethodLabel(j.signatureLecteur.method),
+                signerUid: j.signatureLecteur.signerUid,
+                signerName: j.signatureLecteur.signerName,
+                signerEmail: j.signatureLecteur.signerEmail,
+                verificationId: j.signatureLecteur.verificationId,
+                verifiedAt: j.signatureLecteur.verifiedAt,
+                signedAt: j.signatureLecteur.signedAt,
+                documentSha256: j.signatureLecteur.documentSha256,
+                cryptoDigest: j.signatureLecteur.cryptoDigest,
+                webAuthnUsed: j.signatureLecteur.webAuthnUsed,
+                nationalIdHash: j.signatureLecteur.nationalIdHash,
+                integrityVerifiedAtExport: lectVerify?.valid ?? false,
+              }
+            : null,
+        };
+      })
+    );
+
+    const ctrlSummaries = Array.from(
       new Set(
-        authRecords.flatMap((r) => [
-          r.controleur ? `${r.controleur.signerName} (${r.controleur.method})` : '',
-          r.lecteur ? `${r.lecteur.signerName} (${r.lecteur.method})` : '',
-        ])
+        authRecords
+          .filter((r) => r.controleur)
+          .map(
+            (r) =>
+              `Contrôleur: ${r.controleur!.signerName} [${r.controleur!.methodLabel}] (${r.controleur!.verificationId})`
+          )
       )
-    ).filter(Boolean);
+    );
+    const lectSummaries = Array.from(
+      new Set(
+        authRecords
+          .filter((r) => r.lecteur)
+          .map(
+            (r) =>
+              `Entrepreneur/Lecteur: ${r.lecteur!.signerName} [${r.lecteur!.methodLabel}] (${r.lecteur!.verificationId})`
+          )
+      )
+    );
+
+    const uniqueSigners = [...ctrlSummaries, ...lectSummaries];
 
     const uniqueVerifIds = Array.from(
       new Set(
         authRecords.flatMap((r) => [
-          r.controleur?.verificationId || '',
-          r.lecteur?.verificationId || '',
+          r.controleur
+            ? `${r.controleur.methodLabel}:${r.controleur.verificationId}`
+            : '',
+          r.lecteur
+            ? `${r.lecteur.methodLabel}:${r.lecteur.verificationId}`
+            : '',
         ])
       )
     ).filter(Boolean);
 
+    const shaList = Array.from(
+      new Set(
+        authRecords.flatMap((r) => [
+          r.controleur ? `SHA256-Controleur(${r.controleur.methodLabel}):${r.controleur.documentSha256}` : '',
+          r.lecteur ? `SHA256-Lecteur(${r.lecteur.methodLabel}):${r.lecteur.documentSha256}` : '',
+        ])
+      )
+    ).filter(Boolean);
+
+    const primaryCtrl = authRecords.find((r) => r.controleur)?.controleur || null;
+    const primaryLect = authRecords.find((r) => r.lecteur)?.lecteur || null;
+
     const authManifestJson = JSON.stringify({
-      schema: 'INASEP-JDT-AUTH-V1',
+      schema: 'INASEP-JDT-AUTH-V2',
       chantierId: chantier.id,
       chantierNumero: chantier.numero,
       chantierProjet: chantier.projet,
@@ -164,22 +215,48 @@ export async function generateAndDeliverPdf(
 
     pdf.setProperties({
       title: `Journal des travaux - ${chantier.numero || ''} ${chantier.projet || ''}`.trim(),
-      author: uniqueSigners.join(' ; ') || chantier.preposeSurveillance || 'INASEP',
-      subject: `Journaux N° ${journals.map((j) => j.journalNum).join(', ')} | Vérifications: ${uniqueVerifIds.join(', ') || 'Aucune'}`,
+      author: uniqueSigners.join(' | ') || chantier.preposeSurveillance || 'INASEP',
+      subject: `Journaux N° ${journals.map((j) => j.journalNum).join(', ')} | ${
+        uniqueSigners.length > 0
+          ? `Signatures certifiées: ${uniqueSigners.join(' ; ')}`
+          : 'Non signé'
+      }`,
       keywords: [
         'INASEP',
         'Journal des travaux',
+        ...authRecords.flatMap((r) => [
+          r.controleur
+            ? `SignatureControleur=${r.controleur.methodLabel}`
+            : '',
+          r.lecteur
+            ? `SignatureLecteur=${r.lecteur.methodLabel}`
+            : '',
+        ]).filter(Boolean),
         ...uniqueVerifIds,
-        ...authRecords.map((r) => r.controleur?.documentSha256 || '').filter(Boolean),
+        ...shaList,
       ].join(', '),
-      creator: 'Journal des travaux INASEP — Authentification PDF',
+      creator: 'Mes JDT (INASEP) — Signatures certifiées itsme® / e-ID (SHA-256 + ECDSA P-256)',
     });
 
     const xmpBody = [
       `<ChantierId>${xmlEscape(chantier.id)}</ChantierId>`,
       `<ChantierNumero>${xmlEscape(chantier.numero || '')}</ChantierNumero>`,
-      `<VerificationIds>${xmlEscape(uniqueVerifIds.join(','))}</VerificationIds>`,
-      `<Signers>${xmlEscape(uniqueSigners.join(' ; '))}</Signers>`,
+      `<SignatureControleurPresent>${primaryCtrl ? 'true' : 'false'}</SignatureControleurPresent>`,
+      `<SignatureControleurMethode>${xmlEscape(primaryCtrl?.methodLabel || 'Aucune')}</SignatureControleurMethode>`,
+      `<SignatureControleurIdentite>${xmlEscape(primaryCtrl ? `${primaryCtrl.signerName} (${primaryCtrl.signerEmail || primaryCtrl.signerUid})` : '')}</SignatureControleurIdentite>`,
+      `<SignatureControleurReference>${xmlEscape(primaryCtrl?.verificationId || '')}</SignatureControleurReference>`,
+      `<SignatureControleurHorodatage>${xmlEscape(primaryCtrl?.signedAt || '')}</SignatureControleurHorodatage>`,
+      `<SignatureControleurEmpreinteDonneesSHA256>${xmlEscape(primaryCtrl?.documentSha256 || '')}</SignatureControleurEmpreinteDonneesSHA256>`,
+      `<SignatureControleurPreuveECDSA>${xmlEscape(primaryCtrl?.cryptoDigest || '')}</SignatureControleurPreuveECDSA>`,
+      `<SignatureLecteurPresent>${primaryLect ? 'true' : 'false'}</SignatureLecteurPresent>`,
+      `<SignatureLecteurMethode>${xmlEscape(primaryLect?.methodLabel || 'Aucune')}</SignatureLecteurMethode>`,
+      `<SignatureLecteurIdentite>${xmlEscape(primaryLect ? `${primaryLect.signerName} (${primaryLect.signerEmail || primaryLect.signerUid})` : '')}</SignatureLecteurIdentite>`,
+      `<SignatureLecteurReference>${xmlEscape(primaryLect?.verificationId || '')}</SignatureLecteurReference>`,
+      `<SignatureLecteurHorodatage>${xmlEscape(primaryLect?.signedAt || '')}</SignatureLecteurHorodatage>`,
+      `<SignatureLecteurEmpreinteDonneesSHA256>${xmlEscape(primaryLect?.documentSha256 || '')}</SignatureLecteurEmpreinteDonneesSHA256>`,
+      `<SignatureLecteurPreuveECDSA>${xmlEscape(primaryLect?.cryptoDigest || '')}</SignatureLecteurPreuveECDSA>`,
+      `<VerificationIds>${xmlEscape(uniqueVerifIds.join(', '))}</VerificationIds>`,
+      `<Signers>${xmlEscape(uniqueSigners.join(' | '))}</Signers>`,
       `<SignaturesAuthJSON>${xmlEscape(authManifestJson)}</SignaturesAuthJSON>`,
     ].join('');
 

@@ -1,110 +1,353 @@
 import {
-  ETATS,
   INASEP_LOGO_DATA_URL,
-  SECTION_LABELS,
   type Chantier,
   type Journal,
+  type Ouvrier,
 } from '../types';
 import {
   cleanChantierRef,
-  dayNameFR,
   escHtml,
   fmtDateFR,
+  fmtDateShortDash,
+  fmtHourFR,
   todayISO,
   weekKey,
   weekRangeLabel,
 } from './dates';
 import { downloadBlob } from './storage';
 
-function renderSheetHTML(ch: Chantier, j: Journal): string {
-  const ouvriers = (j.ouvriers || []).filter(
-    (o) => o.firme || o.metier || (o.nbre && o.nbre > 0)
+function cleanList(items: string[] | undefined): string[] {
+  return (items || []).map((x) => x.trim()).filter(Boolean);
+}
+
+function parseMaterielLine(raw: string): { qty: string; text: string } {
+  const match = /^\s*(\d+(?:[.,]\d+)?)\s*[x×]?\s+(.+)$/i.exec(raw);
+  if (match) {
+    return { qty: match[1], text: match[2].trim() };
+  }
+  return { qty: '', text: raw };
+}
+
+interface WorkerRowMeta {
+  firme: string;
+  metier: string;
+  nbre: number | string;
+  firmeRowSpan: number; // 0 = covered by previous rowSpan
+}
+
+function buildWorkerRows(ouvriers: Ouvrier[]): WorkerRowMeta[] {
+  const valid = (ouvriers || []).filter(
+    (o) => o.firme?.trim() || o.metier?.trim() || (o.nbre && o.nbre > 0)
   );
-  const totalOuv = ouvriers.reduce((s, o) => s + (Number(o.nbre) || 0), 0);
+  const result: WorkerRowMeta[] = valid.map((o) => ({
+    firme: (o.firme || '').trim(),
+    metier: (o.metier || '').trim(),
+    nbre: o.nbre ?? '',
+    firmeRowSpan: 1,
+  }));
 
-  const renderList = (arr: string[]) => {
-    const items = (arr || []).map((x) => x.trim()).filter(Boolean);
-    if (!items.length) return '<div class="empty">Néant</div>';
-    return `<ul class="lines-list">${items.map((x) => `<li>${escHtml(x)}</li>`).join('')}</ul>`;
-  };
+  let i = 0;
+  while (i < result.length) {
+    const f = result[i].firme;
+    if (!f) {
+      i += 1;
+      continue;
+    }
+    let span = 1;
+    while (
+      i + span < result.length &&
+      result[i + span].firme.toLowerCase() === f.toLowerCase()
+    ) {
+      result[i + span].firmeRowSpan = 0;
+      span += 1;
+    }
+    result[i].firmeRowSpan = span;
+    i += span;
+  }
 
-  const etatHtml = ETATS.map((e) => {
-    const on = (j.etatAtmo || []).includes(e);
-    return `<span style="margin-right:10px;white-space:nowrap">${on ? '☑' : '☐'} ${escHtml(e)}</span>`;
-  }).join('');
+  return result;
+}
+
+function renderSheetHTML(ch: Chantier, j: Journal): string {
+  const workerRows = buildWorkerRows(j.ouvriers || []);
+  const totalOuvriers = (j.ouvriers || []).reduce(
+    (s, o) => s + (Number(o.nbre) || 0),
+    0
+  );
+
+  const travauxLines = cleanList(j.travaux);
+  const materielLines = cleanList(j.materiel).map(parseMaterielLine);
+  const materiauxLines = cleanList(j.materiaux);
+  const essaisLines = cleanList(j.essais);
+  const evenementsLines = cleanList(j.evenements);
+  const decisionsLines = cleanList(j.decisions);
+  const visitesLines = cleanList(j.visites);
+
+  const abMiddleRows = Math.max(
+    18,
+    workerRows.length + 1,
+    travauxLines.length - 1
+  );
+  const ceRows = Math.max(8, materielLines.length, materiauxLines.length);
+  const fRows = Math.max(5, essaisLines.length);
+  const hRows = Math.max(5, evenementsLines.length);
+  const jkRows = Math.max(4, decisionsLines.length, visitesLines.length);
+
+  const etatText = (j.etatAtmo || [])
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .join(', ');
+
+  const hDebut = fmtHourFR(j.horaireDebut || ch.horaireDebut);
+  const hFin = fmtHourFR(j.horaireFin || ch.horaireFin);
+
+  const supervisorName =
+    j.signatureControleur?.signerName || ch.preposeSurveillance || '';
+
+  const abRowsHtml = Array.from({ length: abMiddleRows - 1 })
+    .map((_, idx) => {
+      const worker = workerRows[idx];
+      const bLine = travauxLines[idx + 1] || '';
+
+      let aCellsHtml = '';
+      if (worker) {
+        const firmeCell =
+          worker.firmeRowSpan > 0
+            ? `<td colspan="1" rowspan="${worker.firmeRowSpan}" style="text-align:center;font-size:6.8pt">${escHtml(worker.firme)}</td>`
+            : '';
+        aCellsHtml = `${firmeCell}<td colspan="2">${escHtml(worker.metier)}</td><td colspan="1" class="a4-divider-ab" style="text-align:center">${escHtml(worker.nbre)}</td>`;
+      } else {
+        aCellsHtml = `<td colspan="1"></td><td colspan="2"></td><td colspan="1" class="a4-divider-ab"></td>`;
+      }
+
+      return `<tr class="a4-grid-row">${aCellsHtml}<td colspan="5">${escHtml(bLine)}</td></tr>`;
+    })
+    .join('');
+
+  const ceRowsHtml = Array.from({ length: ceRows })
+    .map((_, idx) => {
+      const mat = materielLines[idx];
+      const matx = materiauxLines[idx] || '';
+      return `<tr class="a4-grid-row">
+        <td colspan="2" style="text-align:right;padding-right:5px">${escHtml(mat?.qty || '')}</td>
+        <td colspan="5" class="a4-divider-ce">${escHtml(mat?.text || '')}</td>
+        <td colspan="2">${escHtml(matx)}</td>
+      </tr>`;
+    })
+    .join('');
+
+  const fRowsHtml = Array.from({ length: fRows })
+    .map(
+      (_, idx) => `<tr class="a4-grid-row">
+        <td colspan="7" class="a4-divider-ce">${escHtml(essaisLines[idx] || '')}</td>
+        <td colspan="2"></td>
+      </tr>`
+    )
+    .join('');
+
+  const hRowsHtml = Array.from({ length: hRows })
+    .map(
+      (_, idx) => `<tr class="a4-grid-row">
+        <td colspan="7" class="a4-divider-ce">${escHtml(evenementsLines[idx] || '')}</td>
+        <td colspan="2"></td>
+      </tr>`
+    )
+    .join('');
+
+  const jkRowsHtml = Array.from({ length: jkRows })
+    .map(
+      (_, idx) => `<tr class="a4-grid-row">
+        <td colspan="5" class="a4-divider-ce">${escHtml(decisionsLines[idx] || '')}</td>
+        <td colspan="4">${escHtml(visitesLines[idx] || '')}</td>
+      </tr>`
+    )
+    .join('');
+
+  const sigControleurHtml = j.signatureControleur
+    ? `<div class="a4-auth-badge">
+        <div style="font-weight:700;color:#0a5b9c">✓ Authentifié via ${j.signatureControleur.method === 'itsme' ? 'itsme®' : 'Carte eID'}</div>
+        <div>Le ${escHtml(new Date(j.signatureControleur.signedAt).toLocaleString('fr-BE'))}</div>
+        <div style="font-family:monospace">Réf. ${escHtml(j.signatureControleur.verificationId)}</div>
+      </div>`
+    : '';
+
+  const sigLecteurHtml = j.signatureLecteur
+    ? `<div class="a4-auth-badge reader">
+        <div style="font-weight:700;color:#15803d">✓ Authentifié via ${j.signatureLecteur.method === 'itsme' ? 'itsme®' : 'Carte eID'}</div>
+        <div>Signataire : ${escHtml(j.signatureLecteur.signerName)}</div>
+        <div>Le ${escHtml(new Date(j.signatureLecteur.signedAt).toLocaleString('fr-BE'))}</div>
+        <div style="font-family:monospace">Réf. ${escHtml(j.signatureLecteur.verificationId)}</div>
+      </div>`
+    : '';
 
   return `
-  <div class="sheet">
-    <table class="header-table">
-      <tr>
-        <td style="width:185px"><img class="logo" src="${INASEP_LOGO_DATA_URL}" alt="INASEP"></td>
-        <td>
-          <div style="font-size:10.5pt;font-weight:700">INASEP</div>
-          <div style="font-size:8.5pt;color:#333">Intercommunale Namuroise de Services Publics</div>
-          <div style="font-size:8.5pt;color:#333">Direction de l'Assainissement / Infrastructures</div>
-        </td>
-        <td style="width:155px;text-align:right">
-          <div style="font-size:8pt;color:#444">JOURNAL N°</div>
-          <div style="font-size:15pt;font-weight:700">${escHtml(j.journalNum ?? '')}</div>
-          <div style="font-size:8.5pt">${escHtml(dayNameFR(j.date))} ${escHtml(fmtDateFR(j.date))}</div>
-        </td>
-      </tr>
+  <div class="a4-sheet">
+    <table class="a4-master-table">
+      <colgroup>
+        <col style="width:9%">
+        <col style="width:3.5%">
+        <col style="width:9.5%">
+        <col style="width:5.5%">
+        <col style="width:11%">
+        <col style="width:5.5%">
+        <col style="width:19%">
+        <col style="width:7.5%">
+        <col style="width:29.5%">
+      </colgroup>
+      <tbody>
+        <tr>
+          <td colspan="4" class="a4-left-header-wrap">
+            <table class="a4-inner-table">
+              <tbody>
+                <tr>
+                  <td class="a4-logo-box"><img class="a4-logo" src="${INASEP_LOGO_DATA_URL}" alt="INASEP"></td>
+                </tr>
+                <tr>
+                  <td class="a4-project-box">${escHtml(ch.projet || '—')}</td>
+                </tr>
+                <tr>
+                  <td class="a4-company-box">
+                    <div style="margin-bottom:7px">${escHtml(ch.entrepriseNom || '')}</div>
+                    <div style="white-space:pre-line">${escHtml(ch.entrepriseAdresse || '')}</div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </td>
+          <td colspan="5" class="a4-right-header-wrap">
+            <table class="a4-inner-table a4-inner-right">
+              <colgroup>
+                <col style="width:15.2%">
+                <col style="width:27.6%">
+                <col style="width:21.5%">
+                <col style="width:9.5%">
+                <col style="width:9.2%">
+                <col style="width:17%">
+              </colgroup>
+              <tbody>
+                <tr style="height:19px">
+                  <td class="a4-hdr-lbl">N° de chantier</td>
+                  <td class="a4-hdr-val">${escHtml(ch.numero || '')}</td>
+                  <td class="a4-hdr-lbl">Journal n° :</td>
+                  <td class="a4-hdr-val">${escHtml(j.journalNum ?? '')}</td>
+                  <td class="a4-hdr-lbl">Date:</td>
+                  <td class="a4-hdr-val">${escHtml(fmtDateShortDash(j.date))}</td>
+                </tr>
+                <tr style="height:19px">
+                  <td class="a4-hdr-lbl"></td>
+                  <td class="a4-hdr-val"></td>
+                  <td class="a4-hdr-lbl" style="text-align:right">Horaires de travail de:</td>
+                  <td class="a4-hdr-val">${escHtml(hDebut)}</td>
+                  <td class="a4-hdr-lbl">à:</td>
+                  <td class="a4-hdr-val">${escHtml(hFin)}</td>
+                </tr>
+                <tr style="height:19px">
+                  <td class="a4-hdr-lbl">Références :</td>
+                  <td class="a4-hdr-val">${escHtml(ch.references || '')}</td>
+                  <td class="a4-hdr-lbl">Température (en°C) à 8h00:</td>
+                  <td class="a4-hdr-val">${escHtml(j.tempMatin || '')}</td>
+                  <td class="a4-hdr-lbl">à 16h15 :</td>
+                  <td class="a4-hdr-val">${escHtml(j.tempApresMidi || '')}</td>
+                </tr>
+                <tr style="height:19px">
+                  <td class="a4-hdr-lbl">Adresse chantier:</td>
+                  <td colspan="5" class="a4-hdr-val">${escHtml((ch.adresseChantier || '').replace(/\n/g, ', '))}</td>
+                </tr>
+                <tr>
+                  <td colspan="6" style="vertical-align:top;padding:5px 8px;height:78px;font-size:7.5pt;line-height:1.35">
+                    <span>Etat atmosphérique :</span>
+                    ${etatText ? `<span style="margin-left:4px">${escHtml(etatText)}</span>` : ''}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </td>
+        </tr>
+
+        <tr class="a4-sec-bar">
+          <td colspan="1" class="a4-sec-letter">A</td>
+          <td colspan="3" class="a4-divider-ab">OUVRIERS</td>
+          <td colspan="1" class="a4-sec-letter">B</td>
+          <td colspan="4" class="a4-sec-title-left">TRAVAUX EXECUTES</td>
+        </tr>
+
+        <tr class="a4-grid-row">
+          <td colspan="1" class="a4-subhead-cell">Firme</td>
+          <td colspan="2" class="a4-subhead-cell">Métiers</td>
+          <td colspan="1" class="a4-subhead-cell a4-divider-ab">Nbre</td>
+          <td colspan="5">${escHtml(travauxLines[0] || '')}</td>
+        </tr>
+
+        ${abRowsHtml}
+
+        <tr class="a4-grid-row">
+          <td colspan="1"></td>
+          <td colspan="2" class="a4-total-cell">TOTAL</td>
+          <td colspan="1" class="a4-total-cell a4-divider-ab">${totalOuvriers || ''}</td>
+          <td colspan="5">${escHtml(travauxLines[abMiddleRows] || '')}</td>
+        </tr>
+
+        <tr class="a4-sec-bar">
+          <td colspan="2" class="a4-sec-letter">C</td>
+          <td colspan="5" class="a4-divider-ce">MATERIEL EN SERVICE</td>
+          <td colspan="1" class="a4-sec-letter">E</td>
+          <td colspan="1">MATERIAUX ENTRES CE JOUR</td>
+        </tr>
+
+        ${ceRowsHtml}
+
+        <tr class="a4-sec-bar">
+          <td colspan="2" class="a4-sec-letter">F</td>
+          <td colspan="5" class="a4-divider-ce">ESSAIS SUR CHANTIER</td>
+          <td colspan="2"></td>
+        </tr>
+
+        ${fRowsHtml}
+
+        <tr class="a4-sec-bar">
+          <td colspan="2" class="a4-sec-letter">H</td>
+          <td colspan="5" class="a4-divider-ce">EVENEMENTS IMPREVUS</td>
+          <td colspan="2"></td>
+        </tr>
+
+        ${hRowsHtml}
+
+        <tr class="a4-sec-bar">
+          <td colspan="2" class="a4-sec-letter">J</td>
+          <td colspan="3" class="a4-divider-ce">DECISION PRISES</td>
+          <td colspan="1" class="a4-sec-letter">K</td>
+          <td colspan="3">VISITE DIVERS</td>
+        </tr>
+
+        ${jkRowsHtml}
+
+        <tr class="a4-sign-head">
+          <td colspan="6" class="a4-divider-ce">Le préposé à la surveillance :</td>
+          <td colspan="3">L'entrepreneur ou son délégué :</td>
+        </tr>
+        <tr class="a4-sign-body">
+          <td colspan="6" class="a4-divider-ce">
+            <div class="a4-stamp-row">
+              <div class="a4-stamp-card">
+                <div style="font-weight:700;color:#0a5b9c">${escHtml(supervisorName || 'INASEP')}</div>
+                <div style="color:#0a5b9c;font-style:italic">// Contrôleur de chantier</div>
+                <div>Bureau d'études Distribution</div>
+                <div>Et assainissement des eaux</div>
+                <img class="a4-stamp-logo" src="${INASEP_LOGO_DATA_URL}" alt="INASEP">
+              </div>
+              <div class="a4-sign-display">
+                <div>${escHtml(supervisorName)}</div>
+                ${sigControleurHtml}
+              </div>
+            </div>
+          </td>
+          <td colspan="3">
+            <div class="a4-sign-display">${escHtml(j.sigEntrepreneur || '')}</div>
+            ${sigLecteurHtml}
+          </td>
+        </tr>
+      </tbody>
     </table>
-    <div class="doc-title">JOURNAL DES TRAVAUX</div>
-    <div class="info-grid">
-      <div class="info-box">
-        <div class="info-row"><span class="label">N° de chantier :</span><span class="val">${escHtml(ch.numero || '—')}</span></div>
-        <div class="info-row"><span class="label">Projet :</span><span class="val">${escHtml(ch.projet || '—')}</span></div>
-        <div class="info-row"><span class="label">Références :</span><span class="val">${escHtml(ch.references || '—')}</span></div>
-        <div class="info-row"><span class="label">Adresse chantier :</span><span class="val">${escHtml((ch.adresseChantier || '—').replace(/\n/g, ', '))}</span></div>
-      </div>
-      <div class="info-box">
-        <div class="info-row"><span class="label">Entrepreneur :</span><span class="val">${escHtml(ch.entrepriseNom || '—')}</span></div>
-        <div class="info-row"><span class="label">Adresse :</span><span class="val">${escHtml((ch.entrepriseAdresse || '—').replace(/\n/g, ', '))}</span></div>
-        <div class="info-row"><span class="label">Surveillance :</span><span class="val">${escHtml(ch.preposeSurveillance || '—')}</span></div>
-        <div class="info-row"><span class="label">Horaire chantier :</span><span class="val">${escHtml(j.horaireDebut || ch.horaireDebut || '—')} – ${escHtml(j.horaireFin || ch.horaireFin || '—')}</span></div>
-      </div>
-    </div>
-    <table class="meta-table">
-      <tr>
-        <th style="width:20%">Température 8h00</th><td style="width:30%">${j.tempMatin ? `${escHtml(j.tempMatin)} °C` : '—'}</td>
-        <th style="width:20%">Température 16h15</th><td style="width:30%">${j.tempApresMidi ? `${escHtml(j.tempApresMidi)} °C` : '—'}</td>
-      </tr>
-      <tr><th>État atmosphérique</th><td colspan="3">${etatHtml}</td></tr>
-    </table>
-    <div class="section">
-      <div class="section-title">A. ${SECTION_LABELS.A}</div>
-      <div class="section-body">
-        ${
-          ouvriers.length
-            ? `<table class="workers-table">
-                <thead><tr><th>Firme</th><th>Métier / Qualification</th><th class="num">Nbre</th></tr></thead>
-                <tbody>
-                  ${ouvriers.map((o) => `<tr><td>${escHtml(o.firme || '—')}</td><td>${escHtml(o.metier || '—')}</td><td class="num">${escHtml(o.nbre || 0)}</td></tr>`).join('')}
-                  <tr class="total"><td colspan="2">Total ouvriers présents</td><td class="num">${totalOuv}</td></tr>
-                </tbody>
-              </table>`
-            : '<div class="empty">Néant</div>'
-        }
-      </div>
-    </div>
-    <div class="section"><div class="section-title">B. ${SECTION_LABELS.B}</div><div class="section-body">${renderList(j.travaux)}</div></div>
-    <div class="section"><div class="section-title">C. ${SECTION_LABELS.C}</div><div class="section-body">${renderList(j.materiel)}</div></div>
-    <div class="section"><div class="section-title">E. ${SECTION_LABELS.E}</div><div class="section-body">${renderList(j.materiaux)}</div></div>
-    <div class="section"><div class="section-title">F. ${SECTION_LABELS.F}</div><div class="section-body">${renderList(j.essais)}</div></div>
-    <div class="section"><div class="section-title">H. ${SECTION_LABELS.H}</div><div class="section-body">${renderList(j.evenements)}</div></div>
-    <div class="section"><div class="section-title">J. ${SECTION_LABELS.J}</div><div class="section-body">${renderList(j.decisions)}</div></div>
-    <div class="section"><div class="section-title">K. ${SECTION_LABELS.K}</div><div class="section-body">${renderList(j.visites)}</div></div>
-    <div class="sign-box">
-      <div class="sign-cell">
-        <div class="sign-label">Le préposé à la surveillance</div>
-        <div class="sign-text">${escHtml(ch.preposeSurveillance || '')}</div>
-      </div>
-      <div class="sign-cell">
-        <div class="sign-label">L'entrepreneur</div>
-        <div class="sign-text">${escHtml(j.sigEntrepreneur || '')}</div>
-      </div>
-    </div>
   </div>`;
 }
 
@@ -126,7 +369,7 @@ export function exportShareableHTML(ch: Chantier, journaux: Journal[]): string {
       (wk) => `
       <div class="week-block" id="wk-${escHtml(wk)}">
         <div class="week-banner">${escHtml(weekRangeLabel(wk))} — ${byWeek[wk].length} journal(aux)</div>
-        ${byWeek[wk].map((j) => renderSheetHTML(ch, j)).join('')}
+        <div class="sheet-scroll">${byWeek[wk].map((j) => renderSheetHTML(ch, j)).join('')}</div>
       </div>`
     )
     .join('');
@@ -145,44 +388,48 @@ export function exportShareableHTML(ch: Chantier, journaux: Journal[]): string {
   .nav-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .printbtn { background: #d9d61f; color: #000; border: 0; padding: 8px 14px; border-radius: 7px; font-weight: 700; cursor: pointer; font-size: 13px; }
   .week-banner { max-width: 210mm; margin: 18px auto 8px; padding: 9px 14px; background: #0a5b9c; color: #fff; font-weight: 700; font-size: 13px; border-radius: 6px; }
-  .sheet { width: 210mm; min-height: 297mm; margin: 0 auto 18px; background: #fff; padding: 9mm; box-sizing: border-box; box-shadow: 0 2px 10px rgba(0,0,0,.12); font-size: 9pt; line-height: 1.25; }
-  .header-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
-  .header-table td { border: 1px solid #000; padding: 5px 8px; vertical-align: middle; }
-  .logo { max-width: 155px; max-height: 52px; }
-  .doc-title { font-size: 16pt; font-weight: 700; text-align: center; margin: 4px 0 8px; }
-  .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; font-size: 8.5pt; }
-  .info-box { border: 1px solid #000; padding: 5px 8px; }
-  .info-row { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 2px; }
-  .info-row .label { font-weight: 700; white-space: nowrap; }
-  .info-row .val { text-align: right; word-break: break-word; }
-  .meta-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; font-size: 8.5pt; }
-  .meta-table td, .meta-table th { border: 1px solid #000; padding: 3px 6px; }
-  .meta-table th { background: #e9eef5; text-align: left; }
-  .section { border: 1px solid #000; margin-bottom: 6px; }
-  .section-title { background: #e9eef5; border-bottom: 1px solid #000; padding: 3px 7px; font-weight: 700; font-size: 8.5pt; }
-  .section-body { padding: 4px 7px; min-height: 18px; }
-  .workers-table { width: 100%; border-collapse: collapse; font-size: 8.5pt; }
-  .workers-table th, .workers-table td { border-bottom: 1px solid #ccc; padding: 2px 5px; text-align: left; }
-  .workers-table th { border-bottom: 1px solid #000; background: #f5f7fa; }
-  .workers-table td.num, .workers-table th.num { text-align: right; width: 55px; }
-  .workers-table tr.total td { border-top: 1px solid #000; border-bottom: none; font-weight: 700; background: #f5f7fa; }
-  .lines-list { margin: 0; padding-left: 14px; }
-  .empty { color: #888; font-style: italic; }
-  .sign-box { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 8px; }
-  .sign-cell { border: 1px solid #000; padding: 5px 8px; min-height: 54px; font-size: 8.5pt; }
-  .sign-label { font-weight: 700; margin-bottom: 6px; }
-  .sign-text { font-size: 10pt; font-weight: 600; padding: 4px 2px; }
+  .sheet-scroll { overflow-x: auto; padding-bottom: 8px; }
+  .a4-sheet { width: 210mm; min-height: 297mm; margin: 0 auto 18px; background: #fff; padding: 7mm 8mm; box-sizing: border-box; box-shadow: 0 2px 10px rgba(0,0,0,.12); font-family: Arial, Helvetica, sans-serif; font-size: 7.5pt; line-height: 1.2; color: #000; }
+  .a4-master-table { width: 100%; border-collapse: collapse; table-layout: fixed; border: 1.5px solid #000; }
+  .a4-master-table td, .a4-master-table th { border: 1px solid #000; padding: 1.5px 4px; vertical-align: middle; word-break: break-word; overflow-wrap: anywhere; color: #000; }
+  .a4-left-header-wrap { padding: 0 !important; vertical-align: top !important; border-right: 1.5px solid #000 !important; }
+  .a4-right-header-wrap { padding: 0 !important; vertical-align: top !important; }
+  .a4-inner-table { width: 100%; height: 100%; border-collapse: collapse; table-layout: fixed; }
+  .a4-inner-table td { border: none; border-bottom: 1px solid #000; padding: 2px 5px; vertical-align: middle; }
+  .a4-inner-table tr:last-child td { border-bottom: none; }
+  .a4-inner-right td { border-right: 1px solid #000; }
+  .a4-inner-right td:last-child { border-right: none; }
+  .a4-logo-box { height: 76px; text-align: center; padding: 4px 6px !important; }
+  .a4-logo { max-width: 175px; max-height: 64px; width: auto; height: auto; display: inline-block; vertical-align: middle; }
+  .a4-project-box { min-height: 30px; text-align: center; font-weight: 700; font-size: 8.5pt; line-height: 1.15; text-transform: uppercase; padding: 4px 5px !important; }
+  .a4-company-box { min-height: 48px; text-align: center; font-size: 8pt; line-height: 1.2; padding: 4px 5px !important; }
+  .a4-hdr-lbl { font-size: 6.8pt; text-align: right; color: #000; white-space: nowrap; padding-right: 4px !important; }
+  .a4-hdr-val { font-size: 8.2pt; text-align: left; color: #000; padding-left: 5px !important; }
+  .a4-sec-bar td { border-top: 1.5px solid #000 !important; border-bottom: 1.5px solid #000 !important; font-weight: 700; font-size: 8pt; text-align: center; padding: 2px 4px; background: #fff; height: 17px; }
+  .a4-sec-letter { text-align: center !important; font-weight: 700; }
+  .a4-sec-title-left { text-align: left !important; padding-left: 6px !important; }
+  .a4-grid-row td { height: 15.5px; font-size: 7.1pt; line-height: 1.15; padding: 1.5px 4px; }
+  .a4-subhead-cell { font-weight: 700; font-size: 7.3pt !important; text-align: center; }
+  .a4-total-cell { font-weight: 700; font-size: 7.8pt !important; text-align: center; }
+  .a4-divider-ab, .a4-divider-ce { border-right: 1.5px solid #000 !important; }
+  .a4-sign-head td { border-top: 1.5px solid #000 !important; border-bottom: 1px solid #000 !important; font-weight: 700; font-size: 8pt; text-align: center; padding: 2.5px 6px; }
+  .a4-sign-body td { vertical-align: top; padding: 5px 8px; min-height: 82px; height: 82px; }
+  .a4-stamp-row { display: flex; align-items: center; gap: 8px; }
+  .a4-stamp-card { width: 98px; flex-shrink: 0; text-align: left; font-size: 5.5pt; line-height: 1.25; color: #1e293b; }
+  .a4-stamp-logo { width: 90px; height: auto; margin-top: 3px; display: block; }
+  .a4-sign-display { font-size: 11pt; font-weight: 400; line-height: 1.25; color: #000; }
+  .a4-auth-badge { margin-top: 4px; padding: 3px 5px; border: 1px solid #0a5b9c; background-color: #f4f8fc; font-size: 6.5pt; line-height: 1.25; color: #0f172a; }
+  .a4-auth-badge.reader { border-color: #15803d; background-color: #f3fbf6; }
   @media (max-width: 820px) {
-    .sheet { width: 100%; min-height: auto; padding: 12px; margin: 0 0 12px; }
     .week-banner { margin: 12px 8px 6px; }
-    .info-grid, .sign-box { grid-template-columns: 1fr; }
   }
   @media print {
     @page { size: A4 portrait; margin: 9mm; }
     body { background: #fff; }
     .nav, .week-banner { display: none; }
-    .sheet { width: auto; min-height: 0; padding: 0; margin: 0; box-shadow: none; page-break-after: always; }
-    .sheet:last-child { page-break-after: auto; }
+    .sheet-scroll { overflow: visible; padding: 0; }
+    .a4-sheet { width: auto; min-height: 0; padding: 0; margin: 0; box-shadow: none; page-break-after: always; break-after: page; }
+    .a4-sheet:last-child { page-break-after: auto; break-after: auto; }
   }
 </style>
 </head>
@@ -190,7 +437,7 @@ export function exportShareableHTML(ch: Chantier, journaux: Journal[]): string {
 <div class="nav">
   <div>
     <div class="nav-title">${escHtml(ch.numero || 'Chantier')} — ${escHtml(ch.projet || '')}</div>
-    <div class="nav-sub">Consultation seule · ${list.length} journal(aux) · généré le ${fmtDateFR(todayISO())} · F. Pirquin</div>
+    <div class="nav-sub">Consultation seule · ${list.length} journal(aux) · généré le ${fmtDateFR(todayISO())} · ${escHtml(ch.preposeSurveillance || 'F. Pirquin')}</div>
   </div>
   <div class="nav-actions">
     <button class="printbtn" onclick="window.print()">Imprimer / PDF</button>

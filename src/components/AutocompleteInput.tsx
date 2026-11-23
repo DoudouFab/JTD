@@ -31,7 +31,7 @@ export function AutocompleteInput({
     const filtered = suggestions.filter((s) =>
       q ? s.toLowerCase().includes(q) : true
     );
-    return filtered.slice(0, 12);
+    return filtered.slice(0, 80);
   }, [value, suggestions]);
 
   useEffect(() => {
@@ -87,6 +87,8 @@ export function AutocompleteInput({
       {multiline ? (
         <textarea
           rows={rows}
+          lang="fr"
+          spellCheck={true}
           value={value}
           disabled={disabled}
           onChange={(e) => {
@@ -105,6 +107,8 @@ export function AutocompleteInput({
       ) : (
         <input
           type="text"
+          lang="fr"
+          spellCheck={true}
           value={value}
           disabled={disabled}
           onChange={(e) => {

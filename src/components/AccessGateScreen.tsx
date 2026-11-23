@@ -29,6 +29,8 @@ interface AccessGateScreenProps {
   user: User;
   gateState: AccessGateState;
   errorMessage?: string | null;
+  pendingInviteCode?: string | null;
+  pendingChantierId?: string | null;
   onActivated: (record: AccessUserRecord) => void;
   onPendingCreated: (record: AccessUserRecord) => void;
   onRetryCheck: () => Promise<void>;
@@ -39,6 +41,8 @@ export function AccessGateScreen({
   user,
   gateState,
   errorMessage,
+  pendingInviteCode,
+  pendingChantierId,
   onActivated,
   onPendingCreated,
   onRetryCheck,
@@ -111,6 +115,35 @@ export function AccessGateScreen({
           </div>
 
           <div className="p-6 space-y-4">
+            {pendingInviteCode &&
+              (gateState === 'needs_code' || gateState === 'pending') && (
+                <div className="p-3 rounded-2xl bg-blue-50 border border-blue-200 text-xs text-blue-950 leading-relaxed">
+                  Invitation de dossier détectée (
+                  <span className="font-mono font-bold">{pendingInviteCode}</span>
+                  ). Dès que votre appareil est activé par l&apos;administrateur
+                  (code personnel ou validation ci-dessous), le dossier partagé
+                  s&apos;ouvrira automatiquement.
+                </div>
+              )}
+
+            {pendingChantierId &&
+              (gateState === 'needs_code' || gateState === 'pending') && (
+                <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-950 leading-relaxed space-y-1.5">
+                  <div>
+                    <strong>Accès à un dossier partagé par e-mail</strong> :
+                    aucun code collègue n&apos;est requis si le contrôleur a
+                    encodé votre e-mail dans ce chantier.
+                  </div>
+                  <div>
+                    L&apos;adresse actuellement connectée (
+                    <span className="font-semibold">{user.email}</span>) ne
+                    figure pas encore sur ce dossier : connectez-vous avec
+                    l&apos;adresse e-mail exacte ayant reçu l&apos;invitation ou
+                    cliquez sur <strong>Actualiser</strong> une fois ajoutée.
+                  </div>
+                </div>
+              )}
+
             {/* Revoked State — ONLY Changer de compte button */}
             {gateState === 'revoked' && (
               <div className="text-center space-y-4 py-2">

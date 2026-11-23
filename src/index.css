@@ -19,187 +19,227 @@
   }
 }
 
-/* Official A4 Sheet Print & PDF Replica Styling */
+/* Official A4 Sheet Print & PDF Replica Styling (INASEP Canvas) */
 .a4-sheet {
   width: 210mm;
   min-height: 297mm;
   background: #ffffff;
   color: #000000;
   font-family: Arial, Helvetica, sans-serif;
-  font-size: 9pt;
-  line-height: 1.25;
-  padding: 9mm;
+  font-size: 7.5pt;
+  line-height: 1.2;
+  padding: 7mm 8mm;
   box-sizing: border-box;
 }
 
-.a4-header-table {
+.a4-master-table {
   width: 100%;
   border-collapse: collapse;
-  margin-bottom: 8px;
+  table-layout: fixed;
+  border: 1.5px solid #000000;
 }
 
-.a4-header-table td {
+.a4-master-table td,
+.a4-master-table th {
   border: 1px solid #000000;
-  padding: 5px 8px;
+  padding: 1.5px 4px;
+  vertical-align: middle;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  color: #000000;
+}
+
+.a4-left-header-wrap {
+  padding: 0 !important;
+  vertical-align: top !important;
+  border-right: 1.5px solid #000000 !important;
+}
+
+.a4-right-header-wrap {
+  padding: 0 !important;
+  vertical-align: top !important;
+}
+
+.a4-inner-table {
+  width: 100%;
+  height: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.a4-inner-table td {
+  border: none;
+  border-bottom: 1px solid #000000;
+  padding: 2px 5px;
   vertical-align: middle;
 }
 
+.a4-inner-table tr:last-child td {
+  border-bottom: none;
+}
+
+.a4-inner-right td {
+  border-right: 1px solid #000000;
+}
+
+.a4-inner-right td:last-child {
+  border-right: none;
+}
+
+.a4-logo-box {
+  height: 76px;
+  text-align: center;
+  padding: 4px 6px !important;
+}
+
 .a4-logo {
-  max-width: 155px;
-  max-height: 52px;
+  max-width: 175px;
+  max-height: 64px;
   width: auto;
   height: auto;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.a4-project-box {
+  min-height: 30px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 8.5pt;
+  line-height: 1.15;
+  text-transform: uppercase;
+  padding: 4px 5px !important;
+}
+
+.a4-company-box {
+  min-height: 48px;
+  text-align: center;
+  font-size: 8pt;
+  line-height: 1.2;
+  padding: 4px 5px !important;
+}
+
+.a4-hdr-lbl {
+  font-size: 6.8pt;
+  text-align: right;
+  color: #000000;
+  white-space: nowrap;
+  padding-right: 4px !important;
+}
+
+.a4-hdr-val {
+  font-size: 8.2pt;
+  text-align: left;
+  color: #000000;
+  padding-left: 5px !important;
+}
+
+.a4-sec-bar td {
+  border-top: 1.5px solid #000000 !important;
+  border-bottom: 1.5px solid #000000 !important;
+  font-weight: 700;
+  font-size: 8pt;
+  text-align: center;
+  padding: 2px 4px;
+  background: #ffffff;
+  height: 17px;
+}
+
+.a4-sec-letter {
+  text-align: center !important;
+  font-weight: 700;
+}
+
+.a4-sec-title-left {
+  text-align: left !important;
+  padding-left: 6px !important;
+}
+
+.a4-grid-row td {
+  height: 15.5px;
+  font-size: 7.1pt;
+  line-height: 1.15;
+  padding: 1.5px 4px;
+}
+
+.a4-subhead-cell {
+  font-weight: 700;
+  font-size: 7.3pt !important;
+  text-align: center;
+}
+
+.a4-total-cell {
+  font-weight: 700;
+  font-size: 7.8pt !important;
+  text-align: center;
+}
+
+.a4-divider-ab {
+  border-right: 1.5px solid #000000 !important;
+}
+
+.a4-divider-ce {
+  border-right: 1.5px solid #000000 !important;
+}
+
+.a4-sign-head td {
+  border-top: 1.5px solid #000000 !important;
+  border-bottom: 1px solid #000000 !important;
+  font-weight: 700;
+  font-size: 8pt;
+  text-align: center;
+  padding: 2.5px 6px;
+}
+
+.a4-sign-body td {
+  vertical-align: top;
+  padding: 5px 8px;
+  min-height: 82px;
+  height: 82px;
+}
+
+.a4-stamp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.a4-stamp-card {
+  width: 98px;
+  flex-shrink: 0;
+  text-align: left;
+  font-size: 5.5pt;
+  line-height: 1.25;
+  color: #1e293b;
+}
+
+.a4-stamp-logo {
+  width: 90px;
+  height: auto;
+  margin-top: 3px;
   display: block;
 }
 
-.a4-title {
-  font-size: 16pt;
-  font-weight: 700;
-  text-align: center;
-  margin: 4px 0 8px;
-  letter-spacing: 0.4px;
+.a4-sign-display {
+  font-size: 11pt;
+  font-weight: 400;
+  line-height: 1.25;
   color: #000000;
 }
 
-.a4-info-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-bottom: 8px;
-  font-size: 8.5pt;
+.a4-auth-badge {
+  margin-top: 4px;
+  padding: 3px 5px;
+  border: 1px solid #0a5b9c;
+  background-color: #f4f8fc;
+  font-size: 6.5pt;
+  line-height: 1.25;
+  color: #0f172a;
 }
 
-.a4-info-box {
-  border: 1px solid #000000;
-  padding: 5px 8px;
-}
-
-.a4-info-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 2px;
-}
-
-.a4-info-row .a4-label {
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.a4-info-row .a4-val {
-  text-align: right;
-  word-break: break-word;
-}
-
-.a4-meta-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-bottom: 8px;
-  font-size: 8.5pt;
-}
-
-.a4-meta-table td,
-.a4-meta-table th {
-  border: 1px solid #000000;
-  padding: 3px 6px;
-}
-
-.a4-meta-table th {
-  background: #e9eef5;
-  text-align: left;
-  font-weight: 700;
-}
-
-.a4-section {
-  border: 1px solid #000000;
-  margin-bottom: 6px;
-  page-break-inside: avoid;
-}
-
-.a4-section-title {
-  background: #e9eef5;
-  border-bottom: 1px solid #000000;
-  padding: 3px 7px;
-  font-weight: 700;
-  font-size: 8.5pt;
-}
-
-.a4-section-body {
-  padding: 4px 7px;
-  min-height: 18px;
-}
-
-.a4-workers-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 8.5pt;
-}
-
-.a4-workers-table th,
-.a4-workers-table td {
-  border-bottom: 1px solid #cccccc;
-  padding: 2px 5px;
-  text-align: left;
-}
-
-.a4-workers-table th {
-  border-bottom: 1px solid #000000;
-  font-weight: 700;
-  background: #f5f7fa;
-}
-
-.a4-workers-table td.num,
-.a4-workers-table th.num {
-  text-align: right;
-  width: 55px;
-}
-
-.a4-workers-table tr.total td {
-  border-top: 1px solid #000000;
-  border-bottom: none;
-  font-weight: 700;
-  background: #f5f7fa;
-}
-
-.a4-lines-list {
-  margin: 0;
-  padding-left: 14px;
-}
-
-.a4-lines-list li {
-  margin-bottom: 1.5px;
-}
-
-.a4-empty {
-  color: #888888;
-  font-style: italic;
-}
-
-.a4-sign-box {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  margin-top: 8px;
-}
-
-.a4-sign-cell {
-  border: 1px solid #000000;
-  padding: 5px 8px;
-  min-height: 54px;
-  font-size: 8.5pt;
-}
-
-.a4-sign-label {
-  font-weight: 700;
-  margin-bottom: 8px;
-  color: #000000;
-}
-
-.a4-sign-text {
-  font-size: 10pt;
-  font-weight: 600;
-  padding: 6px 2px;
-  color: #111111;
+.a4-auth-badge.reader {
+  border-color: #15803d;
+  background-color: #f3fbf6;
 }
 
 #printRoot {

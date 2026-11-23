@@ -20,6 +20,7 @@ interface ChantiersViewProps {
   chantiers: Chantier[];
   shareByChantierId: Record<string, ChantierShare>;
   currentUserId: string;
+  isColleagueOrAdmin?: boolean;
   lastBackupIso: string | null;
   localMigrationCount: number;
   migratingLocal: boolean;
@@ -39,6 +40,7 @@ export function ChantiersView({
   chantiers,
   shareByChantierId,
   currentUserId,
+  isColleagueOrAdmin = true,
   lastBackupIso,
   localMigrationCount,
   migratingLocal,
@@ -110,7 +112,7 @@ export function ChantiersView({
   return (
     <div className="space-y-6">
       {/* Local-to-Cloud One-Click Migration Banner */}
-      {localMigrationCount > 0 && (
+      {isColleagueOrAdmin && localMigrationCount > 0 && (
         <div className="rounded-2xl border border-[#0a5b9c]/30 bg-[#0a5b9c]/[0.06] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-start gap-3">
             <div className="w-10 h-10 rounded-xl bg-[#0a5b9c] text-white flex items-center justify-center shrink-0">
@@ -144,10 +146,16 @@ export function ChantiersView({
             Chantiers
           </h1>
           <p className="text-xs sm:text-sm text-slate-500 mt-0.5 tabular-nums">
-            {ownedCount} dossier(s) personnel(s)
-            {sharedCount > 0
-              ? ` · ${sharedCount} accès temporaire(s) en lecture`
-              : ' · Espace privé et cloisonné'}
+            {isColleagueOrAdmin ? (
+              <>
+                {ownedCount} dossier(s) personnel(s)
+                {sharedCount > 0
+                  ? ` · ${sharedCount} dossier(s) partagé(s) en lecture`
+                  : ' · Espace privé et cloisonné'}
+              </>
+            ) : (
+              `${sharedCount} dossier(s) accessible(s) en lecture & signature`
+            )}
           </p>
         </div>
 
@@ -166,14 +174,16 @@ export function ChantiersView({
               <span className="hidden sm:inline">Actualiser</span>
             </button>
           )}
-          <button
-            type="button"
-            onClick={onNewChantier}
-            className="min-h-[44px] px-4 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-sm flex items-center justify-center gap-2 shadow-xs cursor-pointer shrink-0"
-          >
-            <Plus className="w-4 h-4" />
-            Nouveau chantier
-          </button>
+          {isColleagueOrAdmin && (
+            <button
+              type="button"
+              onClick={onNewChantier}
+              className="min-h-[44px] px-4 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-sm flex items-center justify-center gap-2 shadow-xs cursor-pointer shrink-0"
+            >
+              <Plus className="w-4 h-4" />
+              Nouveau chantier
+            </button>
+          )}
         </div>
       </div>
 
@@ -228,7 +238,7 @@ export function ChantiersView({
             />
           </div>
 
-          {sharedCount > 0 && (
+          {isColleagueOrAdmin && sharedCount > 0 && (
             <div className="grid grid-cols-3 p-1 rounded-xl bg-slate-200/75 border border-slate-200 shrink-0">
               {(
                 [
@@ -262,20 +272,25 @@ export function ChantiersView({
             <Building2 className="w-6 h-6" />
           </div>
           <h2 className="text-base font-bold text-slate-900">
-            Aucun chantier enregistré
+            {isColleagueOrAdmin
+              ? 'Aucun chantier enregistré'
+              : 'Aucun dossier partagé avec cette adresse'}
           </h2>
           <p className="text-sm text-slate-500 max-w-md mx-auto mt-1.5">
-            Créez votre premier chantier personnel ou saisissez un code
-            d&apos;accès temporaire pour consulter un dossier partagé avec vous.
+            {isColleagueOrAdmin
+              ? "Créez votre premier chantier personnel ou saisissez un code d'accès temporaire pour consulter un dossier partagé avec vous."
+              : "Saisissez un code d'invitation ci-dessus ou demandez au contrôleur d'ajouter votre adresse e-mail dans Modifier le chantier."}
           </p>
-          <button
-            type="button"
-            onClick={onNewChantier}
-            className="mt-5 min-h-[44px] px-5 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-sm inline-flex items-center gap-2 cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            Créer un chantier
-          </button>
+          {isColleagueOrAdmin && (
+            <button
+              type="button"
+              onClick={onNewChantier}
+              className="mt-5 min-h-[44px] px-5 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-sm inline-flex items-center gap-2 cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              Créer un chantier
+            </button>
+          )}
         </div>
       ) : filtered.length === 0 ? (
         <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center">
@@ -345,8 +360,10 @@ export function ChantiersView({
                           {ch.postes.length > 0
                             ? ` · ${ch.postes.length} postes`
                             : ''}
-                          {(ch.readerIds?.length || 0) > 0
-                            ? ` · ${ch.readerIds!.length} lecteur(s)`
+                          {(ch.readerIds?.length || 0) +
+                            (ch.readerEmails?.length || 0) >
+                          0
+                            ? ` · ${(ch.readerIds?.length || 0) + (ch.readerEmails?.length || 0)} lecteur(s)`
                             : ''}
                         </span>
                       </>
@@ -354,12 +371,11 @@ export function ChantiersView({
                       <>
                         <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
                         <span className="text-amber-800 font-medium truncate">
-                          Lecture temporaire
                           {shareInfo
-                            ? ` · jusqu'au ${new Date(
+                            ? `Lecture & signature · jusqu'au ${new Date(
                                 shareInfo.expiresAtMs
                               ).toLocaleDateString('fr-BE')}`
-                            : ''}
+                            : 'Lecture & signature (accès e-mail)'}
                         </span>
                       </>
                     )}
@@ -398,61 +414,63 @@ export function ChantiersView({
       )}
 
       {/* Backup & Export JSON Section */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div className="flex items-start gap-3">
-            <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
-              <HardDriveIcon />
-            </div>
-            <div>
-              <h3 className="text-sm font-bold text-slate-900">
-                Archivage &amp; import de sauvegarde (.json)
-              </h3>
-              <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">
-                Vos chantiers personnels sont synchronisés dans votre espace
-                cloud sur tous vos appareils. Vous pouvez aussi exporter ou
-                importer une archive <span className="font-mono">.json</span>.
-              </p>
-              {formattedBackupDate && (
-                <p className="text-xs text-emerald-700 font-medium mt-1 tabular-nums">
-                  Dernière archive exportée : {formattedBackupDate}
+      {isColleagueOrAdmin && (
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
+                <HardDriveIcon />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">
+                  Archivage &amp; import de sauvegarde (.json)
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">
+                  Vos chantiers personnels sont synchronisés dans votre espace
+                  cloud sur tous vos appareils. Vous pouvez aussi exporter ou
+                  importer une archive <span className="font-mono">.json</span>.
                 </p>
-              )}
+                {formattedBackupDate && (
+                  <p className="text-xs text-emerald-700 font-medium mt-1 tabular-nums">
+                    Dernière archive exportée : {formattedBackupDate}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+              <button
+                type="button"
+                onClick={onExportJson}
+                className="min-h-[44px] px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-sm flex items-center gap-2 cursor-pointer"
+              >
+                <Download className="w-4 h-4" />
+                Exporter (.json)
+              </button>
+
+              <input
+                ref={importInputRef}
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = '';
+                  if (f) onImportJsonFile(f);
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => importInputRef.current?.click()}
+                className="min-h-[44px] px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-sm flex items-center gap-2 cursor-pointer"
+              >
+                <Upload className="w-4 h-4" />
+                Importer (.json)
+              </button>
             </div>
           </div>
-
-          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-            <button
-              type="button"
-              onClick={onExportJson}
-              className="min-h-[44px] px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-sm flex items-center gap-2 cursor-pointer"
-            >
-              <Download className="w-4 h-4" />
-              Exporter (.json)
-            </button>
-
-            <input
-              ref={importInputRef}
-              type="file"
-              accept="application/json,.json"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                e.target.value = '';
-                if (f) onImportJsonFile(f);
-              }}
-            />
-            <button
-              type="button"
-              onClick={() => importInputRef.current?.click()}
-              className="min-h-[44px] px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-sm flex items-center gap-2 cursor-pointer"
-            >
-              <Upload className="w-4 h-4" />
-              Importer (.json)
-            </button>
-          </div>
-        </div>
-      </section>
+        </section>
+      )}
     </div>
   );
 }

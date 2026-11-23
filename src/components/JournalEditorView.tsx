@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Check,
+  CheckCheck,
   CheckCircle2,
   Clock,
   CopyCheck,
@@ -13,17 +14,30 @@ import {
   Plus,
   Printer,
   ShieldCheck,
+  SpellCheck,
   Trash2,
+  X,
 } from 'lucide-react';
 import {
   ETATS,
   LINE_SECTIONS,
+  STANDARD_TRAVAUX_PRESETS,
   type Chantier,
   type Journal,
   type JournalLineField,
   type Ouvrier,
 } from '../types';
 import { dayNameFR } from '../utils/dates';
+import {
+  addWordToCustomDictionary,
+  checkJournalSpelling,
+  loadCustomDictionary,
+  type SpellIssue,
+} from '../utils/frenchSpellcheck';
+import {
+  verifyJournalSignatureRecord,
+  type SignatureVerificationResult,
+} from '../utils/signatureCrypto';
 import { A4JournalSheet } from './A4JournalSheet';
 import { AutocompleteInput } from './AutocompleteInput';
 
@@ -32,7 +46,6 @@ interface JournalEditorViewProps {
   journal: Journal;
   previousJournal: Journal | null;
   isOwner: boolean;
-  isInCompletedWeek: boolean;
   firmSuggestions: string[];
   travauxSuggestions: string[];
   onChange: (updated: Journal) => void;
@@ -49,7 +62,6 @@ export function JournalEditorView({
   journal,
   previousJournal,
   isOwner,
-  isInCompletedWeek,
   firmSuggestions,
   travauxSuggestions,
   onChange,
@@ -63,6 +75,10 @@ export function JournalEditorView({
   const [mobileTab, setMobileTab] = useState<'form' | 'preview'>(
     isOwner ? 'form' : 'preview'
   );
+  const [spellOpen, setSpellOpen] = useState(false);
+  const [customDict, setCustomDict] = useState<Set<string>>(() =>
+    loadCustomDictionary()
+  );
   const previewWrapRef = useRef<HTMLDivElement | null>(null);
   const [previewScale, setPreviewScale] = useState(0.58);
 
@@ -75,8 +91,48 @@ export function JournalEditorView({
     ? 'controleur'
     : 'lecteur';
   const needsMySignature =
-    isInCompletedWeek &&
+    isCompleted &&
     (currentRole === 'controleur' ? !isSignedCtrl : !isSignedReader);
+
+  const spellIssues = useMemo(
+    () => (readOnly ? [] : checkJournalSpelling(journal, customDict)),
+    [journal, customDict, readOnly]
+  );
+
+  const [ctrlVerify, setCtrlVerify] =
+    useState<SignatureVerificationResult | null>(null);
+  const [lectVerify, setLectVerify] =
+    useState<SignatureVerificationResult | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (journal.signatureControleur) {
+        const res = await verifyJournalSignatureRecord(
+          chantier,
+          journal,
+          journal.signatureControleur
+        );
+        if (!cancelled) setCtrlVerify(res);
+      } else if (!cancelled) {
+        setCtrlVerify(null);
+      }
+      if (journal.signatureLecteur) {
+        const res = await verifyJournalSignatureRecord(
+          chantier,
+          journal,
+          journal.signatureLecteur
+        );
+        if (!cancelled) setLectVerify(res);
+      } else if (!cancelled) {
+        setLectVerify(null);
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [chantier, journal]);
 
   // Measure live preview container to scale the 210mm (~794px) A4 sheet cleanly
   useEffect(() => {
@@ -110,6 +166,13 @@ export function JournalEditorView({
     onChange({ ...journal, [key]: val });
   };
 
+  const etatPresetSet = useMemo(() => new Set<string>(ETATS), []);
+  const customEtatNote = useMemo(
+    () =>
+      (journal.etatAtmo || []).find((item) => !etatPresetSet.has(item)) || '',
+    [journal.etatAtmo, etatPresetSet]
+  );
+
   const toggleEtat = (etat: string) => {
     if (readOnly) return;
     const exists = journal.etatAtmo.includes(etat);
@@ -117,6 +180,18 @@ export function JournalEditorView({
       ? journal.etatAtmo.filter((e) => e !== etat)
       : [...journal.etatAtmo, etat];
     updateField('etatAtmo', next);
+  };
+
+  const updateCustomEtatNote = (val: string) => {
+    if (readOnly) return;
+    const presetOnly = (journal.etatAtmo || []).filter((item) =>
+      etatPresetSet.has(item)
+    );
+    const cleaned = val.trimStart();
+    updateField(
+      'etatAtmo',
+      cleaned.trim() ? [...presetOnly, cleaned] : presetOnly
+    );
   };
 
   const updateOuvrier = (idx: number, patch: Partial<Ouvrier>) => {
@@ -166,6 +241,22 @@ export function JournalEditorView({
     updateField(field, arr);
   };
 
+  const insertPresetTravaux = (label: string) => {
+    if (readOnly) return;
+    const current = [...(journal.travaux || [])];
+    if (current.some((x) => x.trim().toLowerCase() === label.toLowerCase())) {
+      onNotify(`« ${label} » est déjà présent dans la section B.`);
+      return;
+    }
+    const emptyIdx = current.findIndex((x) => !x.trim());
+    if (emptyIdx >= 0) {
+      current[emptyIdx] = label;
+    } else {
+      current.push(label);
+    }
+    updateField('travaux', current);
+  };
+
   const copyPrevWorkers = () => {
     if (readOnly || !previousJournal) return;
     const valid = previousJournal.ouvriers.filter(
@@ -197,6 +288,63 @@ export function JournalEditorView({
       `Matériel repris depuis le Journal N° ${previousJournal.journalNum}.`,
       'success'
     );
+  };
+
+  const applySingleIssueOnJournal = (base: Journal, issue: SpellIssue): Journal => {
+    if (issue.target.kind === 'etatNote') {
+      const presetOnly = (base.etatAtmo || []).filter((item) =>
+        etatPresetSet.has(item)
+      );
+      const currentNote =
+        (base.etatAtmo || []).find((item) => !etatPresetSet.has(item)) || '';
+      const fixedNote = issue.apply(currentNote);
+      return {
+        ...base,
+        etatAtmo: fixedNote.trim() ? [...presetOnly, fixedNote] : presetOnly,
+      };
+    }
+
+    if (issue.target.kind === 'ouvrierMetier') {
+      const idx = issue.target.index;
+      return {
+        ...base,
+        ouvriers: base.ouvriers.map((o, i) =>
+          i === idx ? { ...o, metier: issue.apply(o.metier || '') } : o
+        ),
+      };
+    }
+
+    const { field, index } = issue.target;
+    const arr = [...(base[field] || [])];
+    if (index >= 0 && index < arr.length) {
+      arr[index] = issue.apply(arr[index] || '');
+    }
+    return { ...base, [field]: arr };
+  };
+
+  const handleApplySpellIssue = (issue: SpellIssue) => {
+    if (readOnly) return;
+    onChange(applySingleIssueOnJournal(journal, issue));
+    onNotify(`Corrigé : « ${issue.suggestion} »`, 'success');
+  };
+
+  const handleApplyAllSpellIssues = () => {
+    if (readOnly || !spellIssues.length) return;
+    let next = journal;
+    for (const issue of spellIssues) {
+      next = applySingleIssueOnJournal(next, issue);
+    }
+    onChange(next);
+    onNotify(
+      `${spellIssues.length} correction${spellIssues.length > 1 ? 's' : ''} appliquée${spellIssues.length > 1 ? 's' : ''}.`,
+      'success'
+    );
+  };
+
+  const handleIgnoreSpellWord = (word: string) => {
+    const updated = addWordToCustomDictionary(word);
+    setCustomDict(updated);
+    onNotify(`« ${word} » ajouté à votre dictionnaire personnel.`);
   };
 
   return (
@@ -236,6 +384,28 @@ export function JournalEditorView({
 
         {/* Desktop Actions */}
         <div className="hidden lg:flex items-center gap-2.5 shrink-0">
+          {!readOnly && (
+            <button
+              type="button"
+              onClick={() => {
+                setSpellOpen((v) => !v);
+                setMobileTab('form');
+              }}
+              className={`min-h-[44px] px-3.5 rounded-xl border font-semibold text-sm flex items-center gap-2 cursor-pointer transition-colors ${
+                spellIssues.length > 0
+                  ? 'border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100'
+                  : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+              }`}
+              title="Vérifier l'orthographe française de la page"
+            >
+              <SpellCheck className="w-4 h-4 text-[#0a5b9c]" />
+              <span>
+                Orthographe
+                {spellIssues.length > 0 ? ` (${spellIssues.length})` : ' ✓'}
+              </span>
+            </button>
+          )}
+
           {isOwner && !isSignedAny && (
             <button
               type="button"
@@ -302,8 +472,10 @@ export function JournalEditorView({
           <Lock className="w-4 h-4 text-amber-700 shrink-0" />
           <span>
             {!isOwner
-              ? 'Consultation en lecture seule (accès temporaire sur ce dossier).'
-              : 'Cette page a reçu au moins une signature authentifiée et est verrouillée en modification pour garantir son intégrité.'}
+              ? isSignedAny
+                ? 'Consultation en lecture seule · Cette page a reçu une signature authentifiée et est définitivement verrouillée.'
+                : 'Consultation en lecture seule (accès temporaire sur ce dossier uniquement).'
+              : 'Cette page a reçu au moins une signature authentifiée et est définitivement verrouillée en modification.'}
           </span>
         </div>
       )}
@@ -344,6 +516,120 @@ export function JournalEditorView({
             mobileTab === 'preview' ? 'hidden lg:block' : 'block'
           }`}
         >
+          {/* Mobile quick spellcheck toggle bar */}
+          {!readOnly && (
+            <div className="lg:hidden flex items-center justify-between gap-2 rounded-2xl border border-slate-200 bg-white px-3.5 py-2.5">
+              <div className="text-xs font-semibold text-slate-700 flex items-center gap-2">
+                <SpellCheck className="w-4 h-4 text-[#0a5b9c]" />
+                <span>Correcteur français</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSpellOpen((v) => !v)}
+                className={`min-h-[36px] px-3 rounded-xl border text-xs font-bold cursor-pointer ${
+                  spellIssues.length > 0
+                    ? 'border-amber-300 bg-amber-50 text-amber-900'
+                    : 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                }`}
+              >
+                {spellIssues.length > 0
+                  ? `${spellIssues.length} suggestion${spellIssues.length > 1 ? 's' : ''}`
+                  : 'Aucune faute ✓'}
+              </button>
+            </div>
+          )}
+
+          {/* Integrated French & Chantier Spellchecker Panel */}
+          {!readOnly && spellOpen && (
+            <section className="rounded-2xl border border-[#0a5b9c]/30 bg-white p-4 space-y-3 shadow-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <SpellCheck className="w-4 h-4 text-[#0a5b9c]" />
+                  <h2 className="text-sm font-bold text-slate-900">
+                    Correcteur d&apos;orthographe français
+                  </h2>
+                </div>
+                <div className="flex items-center gap-2">
+                  {spellIssues.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleApplyAllSpellIssues}
+                      className="min-h-[34px] px-3 rounded-lg bg-[#0a5b9c] hover:bg-[#063f6e] text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <CheckCheck className="w-3.5 h-3.5" />
+                      Tout corriger ({spellIssues.length})
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setSpellOpen(false)}
+                    className="min-h-[34px] min-w-[34px] flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 cursor-pointer"
+                    aria-label="Fermer le correcteur"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {spellIssues.length === 0 ? (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 py-2.5 text-xs text-emerald-900 flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+                  <span>
+                    Aucune faute détectée dans les textes saisis. Le
+                    soulignement orthographique natif du navigateur en français
+                    reste également actif dans chaque champ.
+                  </span>
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-100 rounded-xl border border-slate-200 overflow-hidden">
+                  {spellIssues.map((issue) => (
+                    <div
+                      key={issue.id}
+                      className="p-3 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                    >
+                      <div className="min-w-0 space-y-0.5">
+                        <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                          <span className="font-bold text-[#0a5b9c]">
+                            {issue.sectionLabel}
+                          </span>
+                          <span className="text-slate-400">·</span>
+                          <span className="text-slate-500">{issue.reason}</span>
+                        </div>
+                        <div className="text-xs text-slate-700">
+                          <span className="line-through decoration-red-500 text-red-700 font-medium">
+                            {issue.flagged}
+                          </span>{' '}
+                          <span className="text-slate-400">→</span>{' '}
+                          <span className="font-bold text-emerald-700">
+                            {issue.suggestion}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleApplySpellIssue(issue)}
+                          className="min-h-[34px] px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold cursor-pointer"
+                        >
+                          Corriger
+                        </button>
+                        {issue.canAddToDict && (
+                          <button
+                            type="button"
+                            onClick={() => handleIgnoreSpellWord(issue.flagged)}
+                            className="min-h-[34px] px-2.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-600 cursor-pointer"
+                          >
+                            Ignorer
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
           {/* Carry-over Helper */}
           {!readOnly && previousJournal && (
             <div className="rounded-2xl border border-[#0a5b9c]/25 bg-[#0a5b9c]/[0.04] px-4 py-3 flex flex-wrap items-center justify-between gap-2">
@@ -507,6 +793,16 @@ export function JournalEditorView({
                   );
                 })}
               </div>
+              <input
+                type="text"
+                lang="fr"
+                spellCheck={true}
+                disabled={readOnly}
+                value={customEtatNote}
+                onChange={(e) => updateCustomEtatNote(e.target.value)}
+                placeholder="Précision météo (ex. Météo généralement sèche, rares petites pluies du matin.)"
+                className="mt-2.5 w-full min-h-[42px] px-3.5 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-[#0a5b9c] focus:ring-2 focus:ring-[#0a5b9c]/15 disabled:bg-slate-50 disabled:text-slate-600"
+              />
             </div>
           </section>
 
@@ -539,6 +835,8 @@ export function JournalEditorView({
                     />
                     <input
                       type="text"
+                      lang="fr"
+                      spellCheck={true}
                       disabled={readOnly}
                       value={o.metier}
                       onChange={(e) =>
@@ -648,6 +946,33 @@ export function JournalEditorView({
                   )}
                 </div>
 
+                {sec.key === 'travaux' && !readOnly && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] font-semibold text-slate-500 mr-1">
+                      Mentions rapides :
+                    </span>
+                    {STANDARD_TRAVAUX_PRESETS.map((preset) => {
+                      const alreadyUsed = items.some(
+                        (x) => x.trim().toLowerCase() === preset.toLowerCase()
+                      );
+                      return (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() => insertPresetTravaux(preset)}
+                          className={`min-h-[32px] px-2.5 rounded-lg border text-xs font-semibold cursor-pointer transition-colors ${
+                            alreadyUsed
+                              ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                              : 'border-slate-200 bg-slate-50 hover:border-[#0a5b9c] hover:bg-[#0a5b9c]/[0.06] text-slate-700'
+                          }`}
+                        >
+                          {alreadyUsed ? `✓ ${preset}` : `+ ${preset}`}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
                 {items.length > 0 && (
                   <div className="space-y-2.5">
                     {items.map((line, idx) => (
@@ -665,6 +990,8 @@ export function JournalEditorView({
                         ) : (
                           <textarea
                             rows={2}
+                            lang="fr"
+                            spellCheck={true}
                             disabled={readOnly}
                             value={line}
                             onChange={(e) =>
@@ -722,11 +1049,21 @@ export function JournalEditorView({
               )}
             </div>
 
-            {!isInCompletedWeek && (
+            {!isCompleted && (
               <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs text-slate-600">
-                La signature authentifiée par page est activée dès que toutes
-                les pages de cette semaine sont marquées comme{' '}
-                <strong>Page terminée</strong>.
+                {isOwner ? (
+                  <>
+                    La signature authentifiée est activée dès que cette page est
+                    marquée comme <strong>Page terminée</strong>.
+                  </>
+                ) : (
+                  <>
+                    Cette page est actuellement <strong>En cours</strong> de
+                    rédaction. Vous pouvez la consulter à tout moment, mais la
+                    signature est uniquement possible une fois la page marquée{' '}
+                    <strong>Page terminée</strong> par le contrôleur.
+                  </>
+                )}
               </div>
             )}
 
@@ -745,13 +1082,21 @@ export function JournalEditorView({
                   <div className="text-[11px] text-emerald-700 space-y-0.5">
                     <div className="font-bold flex items-center gap-1">
                       <CheckCircle2 className="w-3.5 h-3.5" />
-                      Signé via{' '}
+                      Certifié via{' '}
                       {journal.signatureControleur.method === 'itsme'
                         ? 'itsme®'
-                        : 'Carte eID'}
+                        : 'e-ID'}
                     </div>
+                    {journal.signatureControleur.signerEmail && (
+                      <div className="text-[10px] text-slate-600 truncate">
+                        {journal.signatureControleur.signerEmail}
+                      </div>
+                    )}
                     <div className="font-mono text-[10px] text-slate-600 truncate">
                       Réf. {journal.signatureControleur.verificationId}
+                    </div>
+                    <div className="font-mono text-[10px] text-slate-500 truncate">
+                      SHA-256 : {journal.signatureControleur.documentSha256.slice(0, 16)}…
                     </div>
                     <div className="text-[10px] text-slate-500 tabular-nums">
                       Le{' '}
@@ -759,6 +1104,17 @@ export function JournalEditorView({
                         journal.signatureControleur.signedAt
                       ).toLocaleString('fr-BE')}
                     </div>
+                    {ctrlVerify && (
+                      <div
+                        className={`text-[10px] font-semibold ${
+                          ctrlVerify.valid ? 'text-emerald-700' : 'text-red-600'
+                        }`}
+                      >
+                        {ctrlVerify.valid
+                          ? '✓ Données certifiées intactes (SHA-256 + ECDSA)'
+                          : `⚠ ${ctrlVerify.reason || 'Empreinte modifiée'}`}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="text-xs text-slate-400">
@@ -786,14 +1142,22 @@ export function JournalEditorView({
                   <div className="text-[11px] text-emerald-700 space-y-0.5">
                     <div className="font-bold flex items-center gap-1">
                       <CheckCircle2 className="w-3.5 h-3.5" />
-                      Signé par {journal.signatureLecteur.signerName} (
+                      Certifié par {journal.signatureLecteur.signerName} (
                       {journal.signatureLecteur.method === 'itsme'
                         ? 'itsme®'
-                        : 'Carte eID'}
+                        : 'e-ID'}
                       )
                     </div>
+                    {journal.signatureLecteur.signerEmail && (
+                      <div className="text-[10px] text-slate-600 truncate">
+                        {journal.signatureLecteur.signerEmail}
+                      </div>
+                    )}
                     <div className="font-mono text-[10px] text-slate-600 truncate">
                       Réf. {journal.signatureLecteur.verificationId}
+                    </div>
+                    <div className="font-mono text-[10px] text-slate-500 truncate">
+                      SHA-256 : {journal.signatureLecteur.documentSha256.slice(0, 16)}…
                     </div>
                     <div className="text-[10px] text-slate-500 tabular-nums">
                       Le{' '}
@@ -801,6 +1165,17 @@ export function JournalEditorView({
                         journal.signatureLecteur.signedAt
                       ).toLocaleString('fr-BE')}
                     </div>
+                    {lectVerify && (
+                      <div
+                        className={`text-[10px] font-semibold ${
+                          lectVerify.valid ? 'text-emerald-700' : 'text-red-600'
+                        }`}
+                      >
+                        {lectVerify.valid
+                          ? '✓ Données certifiées intactes (SHA-256 + ECDSA)'
+                          : `⚠ ${lectVerify.reason || 'Empreinte modifiée'}`}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="text-xs text-slate-400">

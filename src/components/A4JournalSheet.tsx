@@ -1,11 +1,10 @@
 import {
-  ETATS,
   INASEP_LOGO_DATA_URL,
-  SECTION_LABELS,
   type Chantier,
   type Journal,
+  type Ouvrier,
 } from '../types';
-import { dayNameFR, fmtDateFR } from '../utils/dates';
+import { fmtDateShortDash, fmtHourFR } from '../utils/dates';
 
 interface A4JournalSheetProps {
   chantier: Chantier;
@@ -13,18 +12,56 @@ interface A4JournalSheetProps {
   className?: string;
 }
 
-function renderLines(items: string[]) {
-  const clean = (items || []).map((x) => x.trim()).filter(Boolean);
-  if (!clean.length) {
-    return <div className="a4-empty">Néant</div>;
+function cleanList(items: string[] | undefined): string[] {
+  return (items || []).map((x) => x.trim()).filter(Boolean);
+}
+
+function parseMaterielLine(raw: string): { qty: string; text: string } {
+  const match = /^\s*(\d+(?:[.,]\d+)?)\s*[x×]?\s+(.+)$/i.exec(raw);
+  if (match) {
+    return { qty: match[1], text: match[2].trim() };
   }
-  return (
-    <ul className="a4-lines-list">
-      {clean.map((line, i) => (
-        <li key={i}>{line}</li>
-      ))}
-    </ul>
+  return { qty: '', text: raw };
+}
+
+interface WorkerRowMeta {
+  firme: string;
+  metier: string;
+  nbre: number | string;
+  firmeRowSpan: number; // 0 means covered by previous rowSpan
+}
+
+function buildWorkerRows(ouvriers: Ouvrier[]): WorkerRowMeta[] {
+  const valid = (ouvriers || []).filter(
+    (o) => o.firme?.trim() || o.metier?.trim() || (o.nbre && o.nbre > 0)
   );
+  const result: WorkerRowMeta[] = valid.map((o) => ({
+    firme: (o.firme || '').trim(),
+    metier: (o.metier || '').trim(),
+    nbre: o.nbre ?? '',
+    firmeRowSpan: 1,
+  }));
+
+  let i = 0;
+  while (i < result.length) {
+    const f = result[i].firme;
+    if (!f) {
+      i += 1;
+      continue;
+    }
+    let span = 1;
+    while (
+      i + span < result.length &&
+      result[i + span].firme.toLowerCase() === f.toLowerCase()
+    ) {
+      result[i + span].firmeRowSpan = 0;
+      span += 1;
+    }
+    result[i].firmeRowSpan = span;
+    i += span;
+  }
+
+  return result;
 }
 
 export function A4JournalSheet({
@@ -32,268 +69,439 @@ export function A4JournalSheet({
   journal,
   className = '',
 }: A4JournalSheetProps) {
-  const ouvriers = (journal.ouvriers || []).filter(
-    (o) => o.firme || o.metier || (o.nbre && o.nbre > 0)
+  const workerRows = buildWorkerRows(journal.ouvriers || []);
+  const totalOuvriers = (journal.ouvriers || []).reduce(
+    (s, o) => s + (Number(o.nbre) || 0),
+    0
   );
-  const totalOuvriers = ouvriers.reduce((s, o) => s + (Number(o.nbre) || 0), 0);
+
+  const travauxLines = cleanList(journal.travaux);
+  const materielLines = cleanList(journal.materiel).map(parseMaterielLine);
+  const materiauxLines = cleanList(journal.materiaux);
+  const essaisLines = cleanList(journal.essais);
+  const evenementsLines = cleanList(journal.evenements);
+  const decisionsLines = cleanList(journal.decisions);
+  const visitesLines = cleanList(journal.visites);
+
+  // Row 0 of A is subheader "Firme | Métiers | Nbre", Row 0..abBodyRows-1 of B are travaux
+  // Plus 1 final row for "TOTAL" in A alongside one more travaux slot in B
+  const abMiddleRows = Math.max(
+    18,
+    workerRows.length + 1,
+    travauxLines.length - 1
+  );
+  const ceRows = Math.max(8, materielLines.length, materiauxLines.length);
+  const fRows = Math.max(5, essaisLines.length);
+  const hRows = Math.max(5, evenementsLines.length);
+  const jkRows = Math.max(4, decisionsLines.length, visitesLines.length);
+
+  const etatText = (journal.etatAtmo || [])
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .join(', ');
+
+  const hDebut = fmtHourFR(journal.horaireDebut || chantier.horaireDebut);
+  const hFin = fmtHourFR(journal.horaireFin || chantier.horaireFin);
+
+  const supervisorName =
+    journal.signatureControleur?.signerName ||
+    chantier.preposeSurveillance ||
+    '';
 
   return (
     <div className={`a4-sheet ${className}`}>
-      <table className="a4-header-table">
+      <table className="a4-master-table">
+        <colgroup>
+          <col style={{ width: '9%' }} />
+          <col style={{ width: '3.5%' }} />
+          <col style={{ width: '9.5%' }} />
+          <col style={{ width: '5.5%' }} />
+          <col style={{ width: '11%' }} />
+          <col style={{ width: '5.5%' }} />
+          <col style={{ width: '19%' }} />
+          <col style={{ width: '7.5%' }} />
+          <col style={{ width: '29.5%' }} />
+        </colgroup>
+
         <tbody>
+          {/* TOP HEADER BLOCK */}
           <tr>
-            <td style={{ width: '185px' }}>
-              <img
-                className="a4-logo"
-                src={INASEP_LOGO_DATA_URL}
-                alt="INASEP"
-              />
-            </td>
-            <td>
-              <div style={{ fontSize: '10.5pt', fontWeight: 700 }}>INASEP</div>
-              <div style={{ fontSize: '8.5pt', color: '#333' }}>
-                Intercommunale Namuroise de Services Publics
-              </div>
-              <div style={{ fontSize: '8.5pt', color: '#333' }}>
-                Direction de l&apos;Assainissement / Infrastructures
-              </div>
-            </td>
-            <td style={{ width: '155px', textAlign: 'right' }}>
-              <div style={{ fontSize: '8pt', color: '#444' }}>JOURNAL N°</div>
-              <div style={{ fontSize: '15pt', fontWeight: 700 }}>
-                {journal.journalNum ?? ''}
-              </div>
-              <div style={{ fontSize: '8.5pt' }}>
-                {dayNameFR(journal.date)} {fmtDateFR(journal.date)}
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-
-      <div className="a4-title">JOURNAL DES TRAVAUX</div>
-
-      <div className="a4-info-grid">
-        <div className="a4-info-box">
-          <div className="a4-info-row">
-            <span className="a4-label">N° de chantier :</span>
-            <span className="a4-val">{chantier.numero || '—'}</span>
-          </div>
-          <div className="a4-info-row">
-            <span className="a4-label">Projet :</span>
-            <span className="a4-val">{chantier.projet || '—'}</span>
-          </div>
-          <div className="a4-info-row">
-            <span className="a4-label">Références :</span>
-            <span className="a4-val">{chantier.references || '—'}</span>
-          </div>
-          <div className="a4-info-row">
-            <span className="a4-label">Adresse chantier :</span>
-            <span className="a4-val">
-              {(chantier.adresseChantier || '—').replace(/\n/g, ', ')}
-            </span>
-          </div>
-        </div>
-
-        <div className="a4-info-box">
-          <div className="a4-info-row">
-            <span className="a4-label">Entrepreneur :</span>
-            <span className="a4-val">{chantier.entrepriseNom || '—'}</span>
-          </div>
-          <div className="a4-info-row">
-            <span className="a4-label">Adresse :</span>
-            <span className="a4-val">
-              {(chantier.entrepriseAdresse || '—').replace(/\n/g, ', ')}
-            </span>
-          </div>
-          <div className="a4-info-row">
-            <span className="a4-label">Surveillance :</span>
-            <span className="a4-val">
-              {chantier.preposeSurveillance || '—'}
-            </span>
-          </div>
-          <div className="a4-info-row">
-            <span className="a4-label">Horaire chantier :</span>
-            <span className="a4-val">
-              {journal.horaireDebut || chantier.horaireDebut || '—'} –{' '}
-              {journal.horaireFin || chantier.horaireFin || '—'}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      <table className="a4-meta-table">
-        <tbody>
-          <tr>
-            <th style={{ width: '20%' }}>Température 8h00</th>
-            <td style={{ width: '30%' }}>
-              {journal.tempMatin ? `${journal.tempMatin} °C` : '—'}
-            </td>
-            <th style={{ width: '20%' }}>Température 16h15</th>
-            <td style={{ width: '30%' }}>
-              {journal.tempApresMidi ? `${journal.tempApresMidi} °C` : '—'}
-            </td>
-          </tr>
-          <tr>
-            <th>État atmosphérique</th>
-            <td colSpan={3}>
-              {ETATS.map((e) => {
-                const on = (journal.etatAtmo || []).includes(e);
-                return (
-                  <span
-                    key={e}
-                    style={{ marginRight: '10px', whiteSpace: 'nowrap' }}
-                  >
-                    {on ? '☑' : '☐'} {e}
-                  </span>
-                );
-              })}
-            </td>
-          </tr>
-        </tbody>
-      </table>
-
-      <div className="a4-section">
-        <div className="a4-section-title">A. {SECTION_LABELS.A}</div>
-        <div className="a4-section-body">
-          {ouvriers.length ? (
-            <table className="a4-workers-table">
-              <thead>
-                <tr>
-                  <th>Firme</th>
-                  <th>Métier / Qualification</th>
-                  <th className="num">Nbre</th>
-                </tr>
-              </thead>
-              <tbody>
-                {ouvriers.map((o, idx) => (
-                  <tr key={idx}>
-                    <td>{o.firme || '—'}</td>
-                    <td>{o.metier || '—'}</td>
-                    <td className="num">{o.nbre || 0}</td>
+            <td colSpan={4} className="a4-left-header-wrap">
+              <table className="a4-inner-table">
+                <tbody>
+                  <tr>
+                    <td className="a4-logo-box">
+                      <img
+                        className="a4-logo"
+                        src={INASEP_LOGO_DATA_URL}
+                        alt="INASEP"
+                      />
+                    </td>
                   </tr>
-                ))}
-                <tr className="total">
-                  <td colSpan={2}>Total ouvriers présents</td>
-                  <td className="num">{totalOuvriers}</td>
-                </tr>
-              </tbody>
-            </table>
-          ) : (
-            <div className="a4-empty">Néant</div>
-          )}
-        </div>
-      </div>
+                  <tr>
+                    <td className="a4-project-box">
+                      {chantier.projet || '—'}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="a4-company-box">
+                      <div style={{ marginBottom: '7px' }}>
+                        {chantier.entrepriseNom || ''}
+                      </div>
+                      <div style={{ whiteSpace: 'pre-line' }}>
+                        {chantier.entrepriseAdresse || ''}
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </td>
 
-      <div className="a4-section">
-        <div className="a4-section-title">B. {SECTION_LABELS.B}</div>
-        <div className="a4-section-body">{renderLines(journal.travaux)}</div>
-      </div>
+            <td colSpan={5} className="a4-right-header-wrap">
+              <table className="a4-inner-table a4-inner-right">
+                <colgroup>
+                  <col style={{ width: '15.2%' }} />
+                  <col style={{ width: '27.6%' }} />
+                  <col style={{ width: '21.5%' }} />
+                  <col style={{ width: '9.5%' }} />
+                  <col style={{ width: '9.2%' }} />
+                  <col style={{ width: '17%' }} />
+                </colgroup>
+                <tbody>
+                  <tr style={{ height: '19px' }}>
+                    <td className="a4-hdr-lbl">N° de chantier</td>
+                    <td className="a4-hdr-val">{chantier.numero || ''}</td>
+                    <td className="a4-hdr-lbl">Journal n° :</td>
+                    <td className="a4-hdr-val">{journal.journalNum ?? ''}</td>
+                    <td className="a4-hdr-lbl">Date:</td>
+                    <td className="a4-hdr-val">
+                      {fmtDateShortDash(journal.date)}
+                    </td>
+                  </tr>
+                  <tr style={{ height: '19px' }}>
+                    <td className="a4-hdr-lbl" />
+                    <td className="a4-hdr-val" />
+                    <td
+                      className="a4-hdr-lbl"
+                      style={{ textAlign: 'right' }}
+                    >
+                      Horaires de travail de:
+                    </td>
+                    <td className="a4-hdr-val">{hDebut}</td>
+                    <td className="a4-hdr-lbl">à:</td>
+                    <td className="a4-hdr-val">{hFin}</td>
+                  </tr>
+                  <tr style={{ height: '19px' }}>
+                    <td className="a4-hdr-lbl">Références :</td>
+                    <td className="a4-hdr-val">{chantier.references || ''}</td>
+                    <td className="a4-hdr-lbl">Température (en°C) à 8h00:</td>
+                    <td className="a4-hdr-val">{journal.tempMatin || ''}</td>
+                    <td className="a4-hdr-lbl">à 16h15 :</td>
+                    <td className="a4-hdr-val">
+                      {journal.tempApresMidi || ''}
+                    </td>
+                  </tr>
+                  <tr style={{ height: '19px' }}>
+                    <td className="a4-hdr-lbl">Adresse chantier:</td>
+                    <td colSpan={5} className="a4-hdr-val">
+                      {(chantier.adresseChantier || '').replace(/\n/g, ', ')}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td
+                      colSpan={6}
+                      style={{
+                        verticalAlign: 'top',
+                        padding: '5px 8px',
+                        height: '78px',
+                        fontSize: '7.5pt',
+                        lineHeight: 1.35,
+                      }}
+                    >
+                      <span>Etat atmosphérique :</span>
+                      {etatText ? (
+                        <span style={{ marginLeft: '4px' }}>{etatText}</span>
+                      ) : null}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </td>
+          </tr>
 
-      <div className="a4-section">
-        <div className="a4-section-title">C. {SECTION_LABELS.C}</div>
-        <div className="a4-section-body">{renderLines(journal.materiel)}</div>
-      </div>
+          {/* SECTION A (OUVRIERS) & SECTION B (TRAVAUX EXECUTES) HEADER */}
+          <tr className="a4-sec-bar">
+            <td colSpan={1} className="a4-sec-letter">
+              A
+            </td>
+            <td colSpan={3} className="a4-divider-ab">
+              OUVRIERS
+            </td>
+            <td colSpan={1} className="a4-sec-letter">
+              B
+            </td>
+            <td colSpan={4} className="a4-sec-title-left">
+              TRAVAUX EXECUTES
+            </td>
+          </tr>
 
-      <div className="a4-section">
-        <div className="a4-section-title">E. {SECTION_LABELS.E}</div>
-        <div className="a4-section-body">{renderLines(journal.materiaux)}</div>
-      </div>
+          {/* ROW 0: A subheader ("Firme | Métiers | Nbre") + B line 0 */}
+          <tr className="a4-grid-row">
+            <td colSpan={1} className="a4-subhead-cell">
+              Firme
+            </td>
+            <td colSpan={2} className="a4-subhead-cell">
+              Métiers
+            </td>
+            <td colSpan={1} className="a4-subhead-cell a4-divider-ab">
+              Nbre
+            </td>
+            <td colSpan={5}>{travauxLines[0] || ''}</td>
+          </tr>
 
-      <div className="a4-section">
-        <div className="a4-section-title">F. {SECTION_LABELS.F}</div>
-        <div className="a4-section-body">{renderLines(journal.essais)}</div>
-      </div>
+          {/* ROWS 1..abMiddleRows-1: Worker rows + B lines */}
+          {Array.from({ length: abMiddleRows - 1 }).map((_, idx) => {
+            const worker = workerRows[idx];
+            const bLine = travauxLines[idx + 1] || '';
 
-      <div className="a4-section">
-        <div className="a4-section-title">H. {SECTION_LABELS.H}</div>
-        <div className="a4-section-body">{renderLines(journal.evenements)}</div>
-      </div>
-
-      <div className="a4-section">
-        <div className="a4-section-title">J. {SECTION_LABELS.J}</div>
-        <div className="a4-section-body">{renderLines(journal.decisions)}</div>
-      </div>
-
-      <div className="a4-section">
-        <div className="a4-section-title">K. {SECTION_LABELS.K}</div>
-        <div className="a4-section-body">{renderLines(journal.visites)}</div>
-      </div>
-
-      <div className="a4-sign-box">
-        <div className="a4-sign-cell">
-          <div className="a4-sign-label">Le préposé à la surveillance</div>
-          <div className="a4-sign-text">
-            {chantier.preposeSurveillance || ''}
-          </div>
-          {journal.signatureControleur && (
-            <div
-              style={{
-                marginTop: '6px',
-                padding: '4px 6px',
-                border: '1px solid #0a5b9c',
-                backgroundColor: '#f4f8fc',
-                fontSize: '7.5pt',
-                lineHeight: 1.35,
-                color: '#0f172a',
-              }}
-            >
-              <div style={{ fontWeight: 700, color: '#0a5b9c' }}>
-                ✓ Authentifié via{' '}
-                {journal.signatureControleur.method === 'itsme'
-                  ? 'itsme®'
-                  : 'Carte eID'}
-              </div>
-              <div>Signataire : {journal.signatureControleur.signerName}</div>
-              <div>
-                Le :{' '}
-                {new Date(journal.signatureControleur.signedAt).toLocaleString(
-                  'fr-BE'
+            return (
+              <tr key={`ab-${idx}`} className="a4-grid-row">
+                {worker ? (
+                  <>
+                    {worker.firmeRowSpan > 0 && (
+                      <td
+                        colSpan={1}
+                        rowSpan={worker.firmeRowSpan}
+                        style={{ textAlign: 'center', fontSize: '6.8pt' }}
+                      >
+                        {worker.firme}
+                      </td>
+                    )}
+                    <td colSpan={2}>{worker.metier}</td>
+                    <td
+                      colSpan={1}
+                      className="a4-divider-ab"
+                      style={{ textAlign: 'center' }}
+                    >
+                      {worker.nbre}
+                    </td>
+                  </>
+                ) : (
+                  <>
+                    <td colSpan={1} />
+                    <td colSpan={2} />
+                    <td colSpan={1} className="a4-divider-ab" />
+                  </>
                 )}
+                <td colSpan={5}>{bLine}</td>
+              </tr>
+            );
+          })}
+
+          {/* TOTAL ROW of A + final line of B */}
+          <tr className="a4-grid-row">
+            <td colSpan={1} />
+            <td colSpan={2} className="a4-total-cell">
+              TOTAL
+            </td>
+            <td colSpan={1} className="a4-total-cell a4-divider-ab">
+              {totalOuvriers || ''}
+            </td>
+            <td colSpan={5}>{travauxLines[abMiddleRows] || ''}</td>
+          </tr>
+
+          {/* SECTION C (MATERIEL EN SERVICE) & SECTION E (MATERIAUX ENTRES CE JOUR) */}
+          <tr className="a4-sec-bar">
+            <td colSpan={2} className="a4-sec-letter">
+              C
+            </td>
+            <td colSpan={5} className="a4-divider-ce">
+              MATERIEL EN SERVICE
+            </td>
+            <td colSpan={1} className="a4-sec-letter">
+              E
+            </td>
+            <td colSpan={1}>MATERIAUX ENTRES CE JOUR</td>
+          </tr>
+
+          {Array.from({ length: ceRows }).map((_, idx) => {
+            const mat = materielLines[idx];
+            const matx = materiauxLines[idx] || '';
+            return (
+              <tr key={`ce-${idx}`} className="a4-grid-row">
+                <td
+                  colSpan={2}
+                  style={{ textAlign: 'right', paddingRight: '5px' }}
+                >
+                  {mat?.qty || ''}
+                </td>
+                <td colSpan={5} className="a4-divider-ce">
+                  {mat?.text || ''}
+                </td>
+                <td colSpan={2}>{matx}</td>
+              </tr>
+            );
+          })}
+
+          {/* SECTION F (ESSAIS SUR CHANTIER) */}
+          <tr className="a4-sec-bar">
+            <td colSpan={2} className="a4-sec-letter">
+              F
+            </td>
+            <td colSpan={5} className="a4-divider-ce">
+              ESSAIS SUR CHANTIER
+            </td>
+            <td colSpan={2} />
+          </tr>
+
+          {Array.from({ length: fRows }).map((_, idx) => (
+            <tr key={`f-${idx}`} className="a4-grid-row">
+              <td colSpan={7} className="a4-divider-ce">
+                {essaisLines[idx] || ''}
+              </td>
+              <td colSpan={2} />
+            </tr>
+          ))}
+
+          {/* SECTION H (EVENEMENTS IMPREVUS) */}
+          <tr className="a4-sec-bar">
+            <td colSpan={2} className="a4-sec-letter">
+              H
+            </td>
+            <td colSpan={5} className="a4-divider-ce">
+              EVENEMENTS IMPREVUS
+            </td>
+            <td colSpan={2} />
+          </tr>
+
+          {Array.from({ length: hRows }).map((_, idx) => (
+            <tr key={`h-${idx}`} className="a4-grid-row">
+              <td colSpan={7} className="a4-divider-ce">
+                {evenementsLines[idx] || ''}
+              </td>
+              <td colSpan={2} />
+            </tr>
+          ))}
+
+          {/* SECTION J (DECISION PRISES) & SECTION K (VISITE DIVERS) */}
+          <tr className="a4-sec-bar">
+            <td colSpan={2} className="a4-sec-letter">
+              J
+            </td>
+            <td colSpan={3} className="a4-divider-ce">
+              DECISION PRISES
+            </td>
+            <td colSpan={1} className="a4-sec-letter">
+              K
+            </td>
+            <td colSpan={3}>VISITE DIVERS</td>
+          </tr>
+
+          {Array.from({ length: jkRows }).map((_, idx) => (
+            <tr key={`jk-${idx}`} className="a4-grid-row">
+              <td colSpan={5} className="a4-divider-ce">
+                {decisionsLines[idx] || ''}
+              </td>
+              <td colSpan={4}>{visitesLines[idx] || ''}</td>
+            </tr>
+          ))}
+
+          {/* SIGNATURE BLOCK */}
+          <tr className="a4-sign-head">
+            <td colSpan={6} className="a4-divider-ce">
+              Le préposé à la surveillance :
+            </td>
+            <td colSpan={3}>L&apos;entrepreneur ou son délégué :</td>
+          </tr>
+          <tr className="a4-sign-body">
+            <td colSpan={6} className="a4-divider-ce">
+              <div className="a4-stamp-row">
+                <div className="a4-stamp-card">
+                  <div style={{ fontWeight: 700, color: '#0a5b9c' }}>
+                    {supervisorName || 'INASEP'}
+                  </div>
+                  <div style={{ color: '#0a5b9c', fontStyle: 'italic' }}>
+                    // Contrôleur de chantier
+                  </div>
+                  <div>Bureau d&apos;études Distribution</div>
+                  <div>Et assainissement des eaux</div>
+                  <img
+                    className="a4-stamp-logo"
+                    src={INASEP_LOGO_DATA_URL}
+                    alt="INASEP"
+                  />
+                </div>
+                <div className="a4-sign-display">
+                  <div>{supervisorName}</div>
+                  {journal.signatureControleur && (
+                    <div className="a4-auth-badge">
+                      <div style={{ fontWeight: 700, color: '#0a5b9c' }}>
+                        ✓ Certifié via{' '}
+                        {journal.signatureControleur.method === 'itsme'
+                          ? 'itsme®'
+                          : 'e-ID'}
+                      </div>
+                      <div>
+                        Accord : {journal.signatureControleur.signerName}
+                        {journal.signatureControleur.signerEmail
+                          ? ` (${journal.signatureControleur.signerEmail})`
+                          : ''}
+                      </div>
+                      <div>
+                        Le{' '}
+                        {new Date(
+                          journal.signatureControleur.signedAt
+                        ).toLocaleString('fr-BE')}
+                      </div>
+                      <div style={{ fontFamily: 'monospace' }}>
+                        Réf. {journal.signatureControleur.verificationId}
+                      </div>
+                      <div style={{ fontFamily: 'monospace', fontSize: '5.5pt' }}>
+                        SHA-256 :{' '}
+                        {journal.signatureControleur.documentSha256.slice(0, 16)}…
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
-              <div style={{ fontFamily: 'monospace', fontSize: '6.8pt' }}>
-                Réf. {journal.signatureControleur.verificationId}
+            </td>
+            <td colSpan={3}>
+              <div className="a4-sign-display">
+                {journal.sigEntrepreneur || ''}
               </div>
-            </div>
-          )}
-        </div>
-        <div className="a4-sign-cell">
-          <div className="a4-sign-label">
-            L&apos;entrepreneur / Lecteur autorisé
-          </div>
-          <div className="a4-sign-text">{journal.sigEntrepreneur || ''}</div>
-          {journal.signatureLecteur && (
-            <div
-              style={{
-                marginTop: '6px',
-                padding: '4px 6px',
-                border: '1px solid #15803d',
-                backgroundColor: '#f3fbf6',
-                fontSize: '7.5pt',
-                lineHeight: 1.35,
-                color: '#0f172a',
-              }}
-            >
-              <div style={{ fontWeight: 700, color: '#15803d' }}>
-                ✓ Authentifié via{' '}
-                {journal.signatureLecteur.method === 'itsme'
-                  ? 'itsme®'
-                  : 'Carte eID'}
-              </div>
-              <div>Signataire : {journal.signatureLecteur.signerName}</div>
-              <div>
-                Le :{' '}
-                {new Date(journal.signatureLecteur.signedAt).toLocaleString(
-                  'fr-BE'
-                )}
-              </div>
-              <div style={{ fontFamily: 'monospace', fontSize: '6.8pt' }}>
-                Réf. {journal.signatureLecteur.verificationId}
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
+              {journal.signatureLecteur && (
+                <div className="a4-auth-badge reader">
+                  <div style={{ fontWeight: 700, color: '#15803d' }}>
+                    ✓ Certifié via{' '}
+                    {journal.signatureLecteur.method === 'itsme'
+                      ? 'itsme®'
+                      : 'e-ID'}
+                  </div>
+                  <div>
+                    Accord : {journal.signatureLecteur.signerName}
+                    {journal.signatureLecteur.signerEmail
+                      ? ` (${journal.signatureLecteur.signerEmail})`
+                      : ''}
+                  </div>
+                  <div>
+                    Le{' '}
+                    {new Date(
+                      journal.signatureLecteur.signedAt
+                    ).toLocaleString('fr-BE')}
+                  </div>
+                  <div style={{ fontFamily: 'monospace' }}>
+                    Réf. {journal.signatureLecteur.verificationId}
+                  </div>
+                  <div style={{ fontFamily: 'monospace', fontSize: '5.5pt' }}>
+                    SHA-256 :{' '}
+                    {journal.signatureLecteur.documentSha256.slice(0, 16)}…
+                  </div>
+                </div>
+              )}
+            </td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   );
 }

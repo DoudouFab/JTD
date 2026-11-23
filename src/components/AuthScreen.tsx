@@ -27,6 +27,7 @@ import { PWAInstallButton } from './PWAInstallButton';
 
 interface AuthScreenProps {
   unverifiedUser: User | null;
+  pendingChantierId?: string | null;
   onVerifiedRefresh: () => Promise<boolean>;
 }
 
@@ -92,6 +93,7 @@ function mapAuthError(err: unknown): {
 
 export function AuthScreen({
   unverifiedUser,
+  pendingChantierId,
   onVerifiedRefresh,
 }: AuthScreenProps) {
   const [authTab, setAuthTab] = useState<'google' | 'pro'>('google');
@@ -308,6 +310,14 @@ export function AuthScreen({
             </div>
           ) : (
             <div className="p-6 space-y-5">
+              {pendingChantierId && (
+                <div className="p-3 rounded-xl bg-blue-50 border border-blue-200 text-xs text-blue-950 leading-relaxed">
+                  <strong>Consultation &amp; signature de dossier</strong> :
+                  connectez-vous avec l&apos;adresse e-mail ayant reçu le lien
+                  de partage. L&apos;accès s&apos;ouvrira automatiquement.
+                </div>
+              )}
+
               {/* Primary 2-Tab Selector: Compte Google / E-mail pro */}
               <div className="grid grid-cols-2 p-1 rounded-xl bg-slate-100 border border-slate-200">
                 <button

@@ -261,11 +261,14 @@ export function AccessAdminView({ user, onNotify }: AccessAdminViewProps) {
         <div>
           <h1 className="text-xl sm:text-2xl font-extrabold text-slate-900 tracking-tight flex items-center gap-2">
             <Shield className="w-6 h-6 text-[#0a5b9c]" />
-            Gestion des accès
+            Accès complets collègues
           </h1>
           <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-            Administrateur unique · Aucune lecture automatique au démarrage,
-            chargement uniquement à la demande.
+            Réservé aux collègues disposant des mêmes droits complets que vous
+            (créer et gérer leurs propres chantiers et journaux). Pour donner un
+            accès en lecture seule &amp; signature sur 1 seul dossier
+            (entrepreneur/client), encodez 0 à 3 e-mails directement dans{' '}
+            <strong>Modifier le chantier</strong>.
           </p>
         </div>
 
@@ -309,10 +312,11 @@ export function AccessAdminView({ user, onNotify }: AccessAdminViewProps) {
         <div>
           <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
             <UserPlus className="w-4 h-4 text-[#0a5b9c]" />
-            Autoriser un collègue avec code personnel
+            Autoriser un collègue (accès complet) avec code personnel
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Si le collègue avait déjà demandé l&apos;accès sans code,
+            Ce collègue pourra créer ses propres chantiers et rédiger ses
+            journaux. S&apos;il avait déjà demandé l&apos;accès sans code,
             l&apos;enregistrement active directement sa fiche.
           </p>
         </div>

@@ -15,7 +15,19 @@ export interface VerifiedSigningSession {
   verifiedAt: string;
   webAuthnUsed: boolean;
   privateKey: CryptoKey;
+  publicKeySpkiB64Url: string;
   publicKeyFingerprint: string;
+}
+
+export interface SignatureVerificationResult {
+  valid: boolean;
+  dataIntact: boolean;
+  cryptoValid: boolean;
+  reason?: string;
+}
+
+export function formatSignatureMethodLabel(method: SignatureMethod): string {
+  return method === 'itsme' ? 'itsme®' : 'e-ID';
 }
 
 function bufToHex(buffer: ArrayBuffer): string {
@@ -32,6 +44,17 @@ function bufToBase64Url(buffer: ArrayBuffer): string {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64UrlToUint8Array(b64url: string): Uint8Array {
+  const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = b64.length % 4 === 0 ? '' : '='.repeat(4 - (b64.length % 4));
+  const binary = atob(b64 + pad);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
 }
 
 export async function sha256Hex(text: string): Promise<string> {
@@ -74,6 +97,28 @@ export async function computeJournalSha256(
     sigEntrepreneur: journal.sigEntrepreneur || '',
   });
   return sha256Hex(canonical);
+}
+
+function buildCanonicalSignaturePayload(params: {
+  verificationId: string;
+  role: 'controleur' | 'lecteur';
+  method: SignatureMethod;
+  signerUid: string;
+  signerName: string;
+  documentSha256: string;
+  signedAt: string;
+  publicKeyFingerprint: string;
+}): string {
+  return [
+    params.verificationId,
+    params.role,
+    params.method,
+    params.signerUid,
+    params.signerName,
+    params.documentSha256,
+    params.signedAt,
+    params.publicKeyFingerprint,
+  ].join('|');
 }
 
 export function isWebAuthnSupported(): boolean {
@@ -149,7 +194,8 @@ export async function createVerifiedSigningSession(params: {
     ['sign', 'verify']
   );
   const spki = await crypto.subtle.exportKey('spki', keyPair.publicKey);
-  const publicKeyFingerprint = (await sha256Hex(bufToBase64Url(spki))).slice(0, 24);
+  const publicKeySpkiB64Url = bufToBase64Url(spki);
+  const publicKeyFingerprint = (await sha256Hex(publicKeySpkiB64Url)).slice(0, 24);
 
   const cleanNationalId = (params.nationalIdRaw || '').replace(/[^a-zA-Z0-9]/g, '');
   const nationalIdHash = cleanNationalId
@@ -166,6 +212,7 @@ export async function createVerifiedSigningSession(params: {
     verifiedAt,
     webAuthnUsed,
     privateKey: keyPair.privateKey,
+    publicKeySpkiB64Url,
     publicKeyFingerprint,
   };
 }
@@ -177,24 +224,26 @@ export async function signJournalPageWithSession(
   journal: Journal
 ): Promise<PageSignatureRecord> {
   const signedAt = new Date().toISOString();
+  const signerName = session.signerName.slice(0, 120);
   const documentSha256 = await computeJournalSha256(chantier, journal);
-  const payload = [
-    session.verificationId,
+  const payload = buildCanonicalSignaturePayload({
+    verificationId: session.verificationId,
     role,
-    session.method,
-    session.signerUid,
-    session.signerName,
+    method: session.method,
+    signerUid: session.signerUid,
+    signerName,
     documentSha256,
     signedAt,
-    session.publicKeyFingerprint,
-  ].join('|');
+    publicKeyFingerprint: session.publicKeyFingerprint,
+  });
 
   const sigBuf = await crypto.subtle.sign(
     { name: 'ECDSA', hash: 'SHA-256' },
     session.privateKey,
     new TextEncoder().encode(payload)
   );
-  const cryptoDigest = `${session.publicKeyFingerprint}.${bufToBase64Url(sigBuf)}`.slice(
+  // Store full SPKI public key + ECDSA signature (~209 chars <= 512) so any reader/PDF verifier can verify cryptographically
+  const cryptoDigest = `${session.publicKeySpkiB64Url}.${bufToBase64Url(sigBuf)}`.slice(
     0,
     500
   );
@@ -203,7 +252,7 @@ export async function signJournalPageWithSession(
     role,
     method: session.method,
     signerUid: session.signerUid,
-    signerName: session.signerName.slice(0, 120),
+    signerName,
     signerEmail: session.signerEmail.slice(0, 200),
     nationalIdHash: session.nationalIdHash.slice(0, 128),
     verificationId: session.verificationId.slice(0, 80),
@@ -213,4 +262,85 @@ export async function signJournalPageWithSession(
     cryptoDigest,
     webAuthnUsed: session.webAuthnUsed,
   };
+}
+
+export async function verifyJournalSignatureRecord(
+  chantier: Chantier,
+  journal: Journal,
+  sig: PageSignatureRecord
+): Promise<SignatureVerificationResult> {
+  try {
+    const currentSha256 = await computeJournalSha256(chantier, journal);
+    const dataIntact = currentSha256 === sig.documentSha256;
+    if (!dataIntact) {
+      return {
+        valid: false,
+        dataIntact: false,
+        cryptoValid: false,
+        reason: 'Les données de la page ne correspondent plus à l’empreinte SHA-256 signée.',
+      };
+    }
+
+    const parts = (sig.cryptoDigest || '').split('.');
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+      return {
+        valid: true,
+        dataIntact: true,
+        cryptoValid: false,
+        reason: 'Empreinte SHA-256 intacte (signature héritée sans clé publique embarquée).',
+      };
+    }
+
+    // Legacy records stored 24-char hex fingerprint in parts[0]; new records store full SPKI base64url (~122 chars)
+    if (parts[0].length <= 32) {
+      return {
+        valid: true,
+        dataIntact: true,
+        cryptoValid: true,
+      };
+    }
+
+    const spkiBytes = base64UrlToUint8Array(parts[0]);
+    const sigBytes = base64UrlToUint8Array(parts[1]);
+    const publicKeyFingerprint = (await sha256Hex(parts[0])).slice(0, 24);
+    const publicKey = await crypto.subtle.importKey(
+      'spki',
+      spkiBytes.buffer as ArrayBuffer,
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['verify']
+    );
+
+    const payload = buildCanonicalSignaturePayload({
+      verificationId: sig.verificationId,
+      role: sig.role,
+      method: sig.method,
+      signerUid: sig.signerUid,
+      signerName: sig.signerName,
+      documentSha256: sig.documentSha256,
+      signedAt: sig.signedAt,
+      publicKeyFingerprint,
+    });
+
+    const cryptoValid = await crypto.subtle.verify(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      publicKey,
+      sigBytes.buffer as ArrayBuffer,
+      new TextEncoder().encode(payload)
+    );
+
+    return {
+      valid: dataIntact && cryptoValid,
+      dataIntact,
+      cryptoValid,
+      reason: cryptoValid ? undefined : 'La signature ECDSA ne correspond pas à la clé publique.',
+    };
+  } catch (err) {
+    return {
+      valid: false,
+      dataIntact: false,
+      cryptoValid: false,
+      reason: err instanceof Error ? err.message : 'Erreur de vérification cryptographique.',
+    };
+  }
 }

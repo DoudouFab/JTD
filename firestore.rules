@@ -12,6 +12,12 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isVerifiedEmail() {
+      return isSignedIn()
+        && request.auth.token.email is string
+        && request.auth.token.email_verified == true;
+    }
+
     function isVerifiedUser() {
       return isSignedIn()
         && request.auth.token.email is string
@@ -173,7 +179,7 @@ service cloud.firestore {
         'preposeSurveillance', 'postes', 'createdAt', 'updatedAt'
       ])
       && data.keys().hasOnly([
-        'id', 'ownerId', 'ownerName', 'visibility', 'readerIds',
+        'id', 'ownerId', 'ownerName', 'visibility', 'readerIds', 'readerEmails',
         'numero', 'projet', 'entrepriseNom', 'entrepriseAdresse',
         'references', 'adresseChantier', 'horaireDebut', 'horaireFin',
         'preposeSurveillance', 'postes', 'journalIds', 'createdAt', 'updatedAt'
@@ -183,6 +189,7 @@ service cloud.firestore {
       && isStringBounded(data.ownerName, 120)
       && data.visibility == 'private'
       && isStringListBounded(data.readerIds, 25)
+      && (!('readerEmails' in data) || isStringListBounded(data.readerEmails, 3))
       && (!('journalIds' in data) || isStringListBounded(data.journalIds, 1000))
       && isStringBounded(data.numero, 100)
       && isStringBounded(data.projet, 250)
@@ -200,15 +207,13 @@ service cloud.firestore {
 
     function isValidJournal(data) {
       return data.keys().hasAll([
-        'id', 'chantierId', 'chantierOwnerId', 'chantierReaderIds',
-        'authorId', 'authorName', 'status', 'journalNum',
-        'date', 'horaireDebut', 'horaireFin', 'tempMatin', 'tempApresMidi',
+        'id', 'chantierId', 'chantierOwnerId', 'journalNum',
+        'date', 'horaireDebut', 'horaireFin',
         'etatAtmo', 'ouvriers', 'travaux', 'materiel', 'materiaux',
-        'essais', 'evenements', 'decisions', 'visites', 'sigEntrepreneur',
-        'signatureControleur', 'signatureLecteur', 'createdAt', 'updatedAt'
+        'essais', 'evenements', 'decisions', 'visites', 'updatedAt'
       ])
       && data.keys().hasOnly([
-        'id', 'chantierId', 'chantierOwnerId', 'chantierReaderIds',
+        'id', 'chantierId', 'chantierOwnerId', 'chantierReaderIds', 'chantierReaderEmails',
         'authorId', 'authorName', 'status', 'journalNum',
         'date', 'horaireDebut', 'horaireFin', 'tempMatin', 'tempApresMidi',
         'etatAtmo', 'ouvriers', 'travaux', 'materiel', 'materiaux',
@@ -218,16 +223,17 @@ service cloud.firestore {
       && isValidId(data.id)
       && isValidId(data.chantierId)
       && isValidId(data.chantierOwnerId)
-      && isStringListBounded(data.chantierReaderIds, 25)
-      && isValidId(data.authorId)
-      && isStringBounded(data.authorName, 120)
-      && data.status in ['in_progress', 'completed']
+      && (!('chantierReaderIds' in data) || isStringListBounded(data.chantierReaderIds, 25))
+      && (!('chantierReaderEmails' in data) || isStringListBounded(data.chantierReaderEmails, 3))
+      && (!('authorId' in data) || isValidId(data.authorId))
+      && (!('authorName' in data) || isStringBounded(data.authorName, 120))
+      && (!('status' in data) || data.status in ['in_progress', 'completed'])
       && data.journalNum is number && data.journalNum >= 1 && data.journalNum <= 99999
       && isStringBounded(data.date, 20)
       && isStringBounded(data.horaireDebut, 20)
       && isStringBounded(data.horaireFin, 20)
-      && isStringBounded(data.tempMatin, 20)
-      && isStringBounded(data.tempApresMidi, 20)
+      && (!('tempMatin' in data) || isStringBounded(data.tempMatin, 20))
+      && (!('tempApresMidi' in data) || isStringBounded(data.tempApresMidi, 20))
       && isStringListBounded(data.etatAtmo, 20)
       && data.ouvriers is list && data.ouvriers.size() <= 100 && (data.ouvriers.size() == 0 || data.ouvriers[0] is map)
       && isStringListBounded(data.travaux, 200)
@@ -237,10 +243,10 @@ service cloud.firestore {
       && isStringListBounded(data.evenements, 200)
       && isStringListBounded(data.decisions, 200)
       && isStringListBounded(data.visites, 200)
-      && isStringBounded(data.sigEntrepreneur, 150)
-      && isValidSignatureRecord(data.signatureControleur, 'controleur')
-      && isValidSignatureRecord(data.signatureLecteur, 'lecteur')
-      && data.createdAt is timestamp
+      && (!('sigEntrepreneur' in data) || isStringBounded(data.sigEntrepreneur, 150))
+      && (!('signatureControleur' in data) || isValidSignatureRecord(data.signatureControleur, 'controleur'))
+      && (!('signatureLecteur' in data) || isValidSignatureRecord(data.signatureLecteur, 'lecteur'))
+      && (!('createdAt' in data) || data.createdAt is timestamp)
       && data.updatedAt is timestamp;
     }
 
@@ -297,6 +303,26 @@ service cloud.firestore {
       return exists(/databases/$(database)/documents/chantierShares/$(chantierId + '_' + request.auth.uid))
         && get(/databases/$(database)/documents/chantierShares/$(chantierId + '_' + request.auth.uid)).data.revoked == false
         && get(/databases/$(database)/documents/chantierShares/$(chantierId + '_' + request.auth.uid)).data.expiresAt > request.time;
+    }
+
+    function isEmailInChantierList(data) {
+      return isVerifiedEmail()
+        && 'readerEmails' in data
+        && data.readerEmails is list
+        && request.auth.token.email.lower() in data.readerEmails;
+    }
+
+    function isEmailReaderOfChantier(chantierId) {
+      return isVerifiedEmail()
+        && exists(/databases/$(database)/documents/chantiers/$(chantierId))
+        && isEmailInChantierList(get(/databases/$(database)/documents/chantiers/$(chantierId)).data);
+    }
+
+    function isEmailInJournalList(data) {
+      return isVerifiedEmail()
+        && 'chantierReaderEmails' in data
+        && data.chantierReaderEmails is list
+        && request.auth.token.email.lower() in data.chantierReaderEmails;
     }
 
     // -------------------------------------------------------------------------
@@ -561,17 +587,28 @@ service cloud.firestore {
         && existing().chantierOwnerId == request.auth.uid;
     }
 
+    function isSignedRecordPresent(sig) {
+      return sig is map
+        && 'verificationId' in sig
+        && sig.verificationId is string
+        && sig.verificationId.size() >= 4;
+    }
+
     // -------------------------------------------------------------------------
     // 5. Private Chantiers & Daily Journals
     // -------------------------------------------------------------------------
     match /chantiers/{chantierId} {
-      allow get: if isVerifiedActive()
+      allow get: if isVerifiedUser()
         && isValidId(chantierId)
-        && (resource == null || existing().ownerId == request.auth.uid || hasActiveShare(chantierId));
+        && (
+          (isVerifiedActive() && (resource == null || existing().ownerId == request.auth.uid || hasActiveShare(chantierId)))
+          || (resource != null && isEmailInChantierList(existing()))
+        );
 
       allow list: if isVerifiedUser()
         && (resource.data.ownerId == request.auth.uid
-          || request.auth.uid in resource.data.readerIds);
+          || ('readerIds' in resource.data && resource.data.readerIds is list && request.auth.uid in resource.data.readerIds)
+          || isEmailInChantierList(resource.data));
 
       allow create: if isVerifiedActive()
         && isValidId(chantierId)
@@ -592,7 +629,7 @@ service cloud.firestore {
         && (
           (existing().ownerId == request.auth.uid
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'readerIds', 'journalIds', 'numero', 'projet', 'entrepriseNom', 'entrepriseAdresse',
+              'readerIds', 'readerEmails', 'journalIds', 'numero', 'projet', 'entrepriseNom', 'entrepriseAdresse',
               'references', 'adresseChantier', 'horaireDebut', 'horaireFin',
               'preposeSurveillance', 'postes', 'updatedAt'
             ]))
@@ -608,20 +645,28 @@ service cloud.firestore {
         && existing().ownerId == request.auth.uid;
 
       match /journaux/{journalId} {
-        allow get: if isVerifiedActive()
+        allow get: if isVerifiedUser()
           && isValidId(chantierId)
           && isValidId(journalId)
-          && (get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid
-              || hasActiveShare(chantierId));
+          && (
+            (isVerifiedActive() && (get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid || hasActiveShare(chantierId)))
+            || isEmailReaderOfChantier(chantierId)
+          );
 
         allow list: if isVerifiedUser()
           && (resource.data.chantierOwnerId == request.auth.uid
-            || request.auth.uid in resource.data.chantierReaderIds);
+            || ('chantierReaderIds' in resource.data && resource.data.chantierReaderIds is list && request.auth.uid in resource.data.chantierReaderIds)
+            || isEmailInJournalList(resource.data));
 
         allow create: if isVerifiedActive()
           && isValidId(chantierId)
           && isValidId(journalId)
           && isValidJournal(incoming())
+          && incoming().keys().hasAll([
+            'chantierReaderIds', 'authorId', 'authorName', 'status',
+            'tempMatin', 'tempApresMidi', 'sigEntrepreneur',
+            'signatureControleur', 'signatureLecteur', 'createdAt'
+          ])
           && incoming().id == journalId
           && incoming().chantierId == chantierId
           && incoming().authorId == request.auth.uid
@@ -634,43 +679,109 @@ service cloud.firestore {
           && incoming().chantierOwnerId == get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId
           && incoming().chantierReaderIds == get(/databases/$(database)/documents/chantiers/$(chantierId)).data.readerIds;
 
-        allow update: if isVerifiedActive()
+        allow update: if isVerifiedUser()
           && isValidId(chantierId)
           && isValidId(journalId)
           && isValidJournal(incoming())
-          && incoming().id == existing().id
-          && incoming().chantierId == existing().chantierId
-          && incoming().chantierOwnerId == existing().chantierOwnerId
-          && incoming().authorId == existing().authorId
-          && incoming().createdAt == existing().createdAt
+          && incoming().id == journalId
+          && incoming().chantierId == chantierId
+          && (
+            incoming().chantierOwnerId == get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId
+            || (('chantierOwnerId' in existing()) && isValidId(existing().chantierOwnerId) && incoming().chantierOwnerId == existing().chantierOwnerId)
+          )
+          && (!('authorId' in existing()) || !isValidId(existing().authorId) || incoming().authorId == existing().authorId)
+          && (
+            (('createdAt' in existing()) && (existing().createdAt is timestamp) && incoming().createdAt == existing().createdAt)
+            || ((!('createdAt' in existing()) || !(existing().createdAt is timestamp)) && incoming().createdAt == request.time)
+          )
           && incoming().updatedAt == request.time
           && (
-            (existing().chantierOwnerId == request.auth.uid
-              && existing().signatureControleur == null
-              && existing().signatureLecteur == null
-              && incoming().diff(existing()).affectedKeys().hasOnly([
+            (isVerifiedActive()
+              && (
+                (('chantierOwnerId' in existing()) && existing().chantierOwnerId == request.auth.uid)
+                || get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid
+              )
+              && (!('signatureControleur' in existing()) || !isSignedRecordPresent(existing().signatureControleur))
+              && (!('signatureLecteur' in existing()) || !isSignedRecordPresent(existing().signatureLecteur))
+              && (!('signatureControleur' in incoming()) || incoming().signatureControleur == null)
+              && (!('signatureLecteur' in incoming()) || incoming().signatureLecteur == null)
+              && incoming().diff(existing()).addedKeys().hasOnly([
+                'id', 'chantierId', 'chantierOwnerId',
                 'status', 'journalNum', 'date', 'horaireDebut', 'horaireFin',
                 'tempMatin', 'tempApresMidi', 'etatAtmo', 'ouvriers',
                 'travaux', 'materiel', 'materiaux', 'essais', 'evenements',
-                'decisions', 'visites', 'sigEntrepreneur', 'updatedAt'
+                'decisions', 'visites', 'sigEntrepreneur',
+                'chantierReaderIds', 'chantierReaderEmails',
+                'authorId', 'authorName', 'signatureControleur', 'signatureLecteur', 'createdAt',
+                'updatedAt'
+              ])
+              && incoming().diff(existing()).changedKeys().hasOnly([
+                'id', 'chantierId', 'chantierOwnerId',
+                'status', 'journalNum', 'date', 'horaireDebut', 'horaireFin',
+                'tempMatin', 'tempApresMidi', 'etatAtmo', 'ouvriers',
+                'travaux', 'materiel', 'materiaux', 'essais', 'evenements',
+                'decisions', 'visites', 'sigEntrepreneur',
+                'chantierReaderIds', 'chantierReaderEmails',
+                'authorId', 'authorName', 'signatureControleur', 'signatureLecteur', 'createdAt',
+                'updatedAt'
               ]))
-            || (existing().chantierOwnerId == request.auth.uid
-                && existing().status == 'completed'
-                && existing().signatureControleur == null
+            || (isVerifiedActive()
+                && (
+                  (('chantierOwnerId' in existing()) && existing().chantierOwnerId == request.auth.uid)
+                  || get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid
+                )
+                && (!('signatureControleur' in existing()) || !isSignedRecordPresent(existing().signatureControleur))
                 && incoming().signatureControleur != null
                 && incoming().signatureControleur.signerUid == request.auth.uid
-                && incoming().diff(existing()).affectedKeys().hasOnly(['signatureControleur', 'updatedAt']))
-            || (hasActiveShare(chantierId)
+                && incoming().status == 'completed'
+                && (
+                  ('signatureLecteur' in existing()
+                    && isSignedRecordPresent(existing().signatureLecteur)
+                    && incoming().signatureLecteur == existing().signatureLecteur
+                    && incoming().diff(existing()).affectedKeys().hasOnly([
+                      'signatureControleur', 'status',
+                      'chantierReaderIds', 'chantierReaderEmails',
+                      'authorId', 'authorName', 'createdAt', 'updatedAt'
+                    ]))
+                  || ((!('signatureLecteur' in existing()) || !isSignedRecordPresent(existing().signatureLecteur))
+                      && (!('signatureLecteur' in incoming()) || incoming().signatureLecteur == null)
+                      && incoming().diff(existing()).addedKeys().hasOnly([
+                        'id', 'chantierId', 'chantierOwnerId',
+                        'status', 'journalNum', 'date', 'horaireDebut', 'horaireFin',
+                        'tempMatin', 'tempApresMidi', 'etatAtmo', 'ouvriers',
+                        'travaux', 'materiel', 'materiaux', 'essais', 'evenements',
+                        'decisions', 'visites', 'sigEntrepreneur',
+                        'chantierReaderIds', 'chantierReaderEmails',
+                        'authorId', 'authorName', 'signatureControleur', 'signatureLecteur', 'createdAt',
+                        'updatedAt'
+                      ])
+                      && incoming().diff(existing()).changedKeys().hasOnly([
+                        'id', 'chantierId', 'chantierOwnerId',
+                        'status', 'journalNum', 'date', 'horaireDebut', 'horaireFin',
+                        'tempMatin', 'tempApresMidi', 'etatAtmo', 'ouvriers',
+                        'travaux', 'materiel', 'materiaux', 'essais', 'evenements',
+                        'decisions', 'visites', 'sigEntrepreneur',
+                        'chantierReaderIds', 'chantierReaderEmails',
+                        'authorId', 'authorName', 'signatureControleur', 'signatureLecteur', 'createdAt',
+                        'updatedAt'
+                      ]))
+                ))
+            || ((isEmailReaderOfChantier(chantierId) || (isVerifiedActive() && hasActiveShare(chantierId)))
                 && existing().status == 'completed'
-                && existing().signatureLecteur == null
+                && (!('signatureLecteur' in existing()) || !isSignedRecordPresent(existing().signatureLecteur))
                 && incoming().signatureLecteur != null
                 && incoming().signatureLecteur.signerUid == request.auth.uid
                 && incoming().diff(existing()).affectedKeys().hasOnly(['signatureLecteur', 'updatedAt']))
-            || (existing().chantierOwnerId == request.auth.uid
-                && incoming().diff(existing()).affectedKeys().hasOnly(['chantierReaderIds', 'updatedAt']))
-            || (hasActiveShare(chantierId)
-                && incoming().chantierReaderIds.hasAll(existing().chantierReaderIds)
-                && incoming().chantierReaderIds.size() <= existing().chantierReaderIds.size() + 1
+            || (isVerifiedActive()
+                && (
+                  (('chantierOwnerId' in existing()) && existing().chantierOwnerId == request.auth.uid)
+                  || get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid
+                )
+                && incoming().diff(existing()).affectedKeys().hasOnly(['chantierReaderIds', 'chantierReaderEmails', 'updatedAt']))
+            || (isVerifiedActive()
+                && hasActiveShare(chantierId)
+                && (!('chantierReaderIds' in existing()) || incoming().chantierReaderIds.hasAll(existing().chantierReaderIds))
+                && (!('chantierReaderIds' in existing()) || incoming().chantierReaderIds.size() <= existing().chantierReaderIds.size() + 1)
                 && request.auth.uid in incoming().chantierReaderIds
                 && incoming().diff(existing()).affectedKeys().hasOnly(['chantierReaderIds', 'updatedAt']))
           );

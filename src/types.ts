@@ -70,6 +70,7 @@ export interface Journal {
   chantierId: string;
   chantierOwnerId?: string;
   chantierReaderIds?: string[];
+  chantierReaderEmails?: string[];
   authorId?: string;
   authorName?: string;
   status?: JournalStatus;
@@ -108,6 +109,7 @@ export interface Chantier {
   ownerName?: string;
   visibility?: 'private';
   readerIds?: string[];
+  readerEmails?: string[];
   numero: string;
   projet: string;
   entrepriseNom: string;
@@ -163,6 +165,13 @@ export const ETATS = [
   'Vent fort',
   'Brouillard',
   'Orage',
+] as const;
+
+export const STANDARD_TRAVAUX_PRESETS = [
+  'Aucune activité',
+  'Intempérie',
+  'Congé Entreprise',
+  'Férié',
 ] as const;
 
 export const SECTION_LABELS = {
