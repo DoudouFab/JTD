@@ -91,6 +91,7 @@
         "visibility": { "type": "string", "enum": ["private"] },
         "readerIds": { "type": "array" },
         "readerEmails": { "type": "array" },
+        "readerAccessCode": { "type": "string", "maxLength": 16, "pattern": "^[0-9]{6}$" },
         "numero": { "type": "string", "maxLength": 100 },
         "projet": { "type": "string", "maxLength": 250 },
         "entrepriseNom": { "type": "string", "maxLength": 200 },
@@ -253,6 +254,37 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "DossierAccess": {
+      "title": "DossierAccess",
+      "description": "Code d'accès à 6 chiffres lié à un seul chantier pour débloquer la lecture et signature entrepreneur.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 8, "maxLength": 160, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "code": { "type": "string", "minLength": 6, "maxLength": 6, "pattern": "^[0-9]{6}$" },
+        "chantierId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "chantierNumero": { "type": "string", "maxLength": 100 },
+        "chantierProjet": { "type": "string", "maxLength": 250 },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "ownerName": { "type": "string", "maxLength": 120 },
+        "active": { "type": "boolean" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "code",
+        "chantierId",
+        "chantierNumero",
+        "chantierProjet",
+        "ownerId",
+        "ownerName",
+        "active",
+        "expiresAt",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -287,6 +319,10 @@
     "/chantierShares/{shareId}": {
       "schema": { "$ref": "#/entities/ChantierShare" },
       "description": "Droits d'accès temporaires en lecture et signature pour un dossier précis."
+    },
+    "/dossier_access/{accessId}": {
+      "schema": { "$ref": "#/entities/DossierAccess" },
+      "description": "Code d'accès à 6 chiffres d'un chantier partagé pour accès lecture/signature à ce seul dossier."
     }
   }
 }

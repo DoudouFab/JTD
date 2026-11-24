@@ -5,13 +5,13 @@ import {
   Fingerprint,
   Info,
   ShieldCheck,
-  Smartphone,
   X,
 } from 'lucide-react';
-import type { Journal, SignatureMethod } from '../types';
+import type { Journal } from '../types';
 import { fmtDateFR } from '../utils/dates';
 import {
   createVerifiedSigningSession,
+  formatSignatureMethodLabel,
   isWebAuthnSupported,
   type VerifiedSigningSession,
 } from '../utils/signatureCrypto';
@@ -46,9 +46,7 @@ export function SignatureModal({
   onConfirmSign,
   onClose,
 }: SignatureModalProps) {
-  const [method, setMethod] = useState<SignatureMethod>(
-    existingSession?.method || 'itsme'
-  );
+  const method = 'eid' as const;
   const [signerName, setSignerName] = useState(
     existingSession?.signerName || defaultSignerName
   );
@@ -166,7 +164,7 @@ export function SignatureModal({
             <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 space-y-1.5">
               <div className="flex items-center gap-2 text-sm font-bold text-emerald-900">
                 <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
-                Vérification d&apos;identité active ({existingSession.method === 'itsme' ? 'itsme®' : 'Carte eID'})
+                Vérification d&apos;identité active ({formatSignatureMethodLabel(existingSession.method)})
               </div>
               <p className="text-xs text-emerald-800">
                 Signataire : <strong>{existingSession.signerName}</strong> · Réf.{' '}
@@ -180,59 +178,16 @@ export function SignatureModal({
             </div>
           ) : (
             <>
-              {/* Method selector */}
-              <div>
-                <div className="text-xs font-bold uppercase tracking-wide text-slate-500 mb-2">
-                  Méthode d&apos;identification
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  <button
-                    type="button"
-                    onClick={() => setMethod('itsme')}
-                    className={`min-h-[56px] p-3 rounded-xl border text-left flex items-center gap-3 cursor-pointer transition-colors ${
-                      method === 'itsme'
-                        ? 'border-[#FF4E00] bg-orange-50/60 ring-2 ring-[#FF4E00]/20'
-                        : 'border-slate-200 bg-white hover:bg-slate-50'
-                    }`}
-                  >
-                    <Smartphone
-                      className={`w-5 h-5 shrink-0 ${
-                        method === 'itsme' ? 'text-[#FF4E00]' : 'text-slate-400'
-                      }`}
-                    />
-                    <div>
-                      <div className="text-sm font-bold text-slate-900">
-                        itsme®
-                      </div>
-                      <div className="text-[11px] text-slate-500">
-                        Identification mobile belge
-                      </div>
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setMethod('eid')}
-                    className={`min-h-[56px] p-3 rounded-xl border text-left flex items-center gap-3 cursor-pointer transition-colors ${
-                      method === 'eid'
-                        ? 'border-[#0a5b9c] bg-[#0a5b9c]/[0.05] ring-2 ring-[#0a5b9c]/20'
-                        : 'border-slate-200 bg-white hover:bg-slate-50'
-                    }`}
-                  >
-                    <CreditCard
-                      className={`w-5 h-5 shrink-0 ${
-                        method === 'eid' ? 'text-[#0a5b9c]' : 'text-slate-400'
-                      }`}
-                    />
-                    <div>
-                      <div className="text-sm font-bold text-slate-900">
-                        Carte d&apos;identité (eID)
-                      </div>
-                      <div className="text-[11px] text-slate-500">
-                        Lecteur / identifiant carte
-                      </div>
-                    </div>
-                  </button>
+              {/* Identification method (e-ID) */}
+              <div className="rounded-xl border border-[#0a5b9c]/30 bg-[#0a5b9c]/[0.04] p-3 flex items-center gap-3">
+                <CreditCard className="w-5 h-5 text-[#0a5b9c] shrink-0" />
+                <div>
+                  <div className="text-sm font-bold text-slate-900">
+                    Signature électronique e-ID
+                  </div>
+                  <div className="text-[11px] text-slate-600">
+                    Scellement SHA-256 + ECDSA P-256 lié à votre compte authentifié
+                  </div>
                 </div>
               </div>
 
@@ -253,9 +208,7 @@ export function SignatureModal({
 
                 <div>
                   <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">
-                    {method === 'itsme'
-                      ? 'N° Registre national / Réf. itsme (optionnel, haché SHA-256)'
-                      : 'N° de carte eID / Registre national (optionnel, haché SHA-256)'}
+                    N° de carte eID / Registre national (optionnel, haché SHA-256)
                   </label>
                   <input
                     type="text"
@@ -292,9 +245,9 @@ export function SignatureModal({
                 <span>
                   L&apos;application génère une empreinte cryptographique
                   SHA-256 + ECDSA P-256 propre à chaque page signée et l&apos;inscrit
-                  dans les métadonnées du PDF. Le raccordement aux serveurs
-                  officiels itsme® / lecteur matériel eID requiert un contrat
-                  marchand / middleware local dédié.
+                  dans les métadonnées du PDF. Une lecture directe avec code PIN
+                  via un lecteur USB sur PC requiert un module local (ex. Web-eID)
+                  ou une passerelle HTTPS serveur mTLS.
                 </span>
               </div>
             </>
@@ -324,7 +277,7 @@ export function SignatureModal({
                 ? 'Vérification et signature…'
                 : existingSession
                   ? `Signer (${unsignedTarget.length} page${unsignedTarget.length > 1 ? 's' : ''})`
-                  : `Vérifier (${method === 'itsme' ? 'itsme®' : 'eID'}) & signer`}
+                  : 'Vérifier (e-ID) & signer'}
             </button>
           </div>
         </form>

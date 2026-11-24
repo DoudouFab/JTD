@@ -11,9 +11,15 @@ import {
   Send,
   Copy,
   Plus,
+  KeyRound,
+  RefreshCw,
 } from 'lucide-react';
 import { STANDARD_TRAVAUX_PRESETS, type Chantier } from '../types';
-import { clampEmailList } from '../utils/firestoreService';
+import {
+  clampEmailList,
+  generateDossierPinCode,
+  normalizeDossierPinCode,
+} from '../utils/firestoreService';
 import {
   DEFAULT_DAY_FOLDER_KEY,
   DEFAULT_WEEK_FOLDER_KEY,
@@ -63,6 +69,7 @@ export function ChantierModal({
   const [preposeSurveillance, setPreposeSurveillance] = useState('');
   const [postes, setPostes] = useState<string[]>([]);
   const [readerEmails, setReaderEmails] = useState<string[]>([]);
+  const [readerAccessCode, setReaderAccessCode] = useState<string>('');
   const [savingBusy, setSavingBusy] = useState(false);
 
   const [dayFolderName, setDayFolderName] = useState<string | null>(null);
@@ -104,10 +111,13 @@ export function ChantierModal({
           )
         : [...STANDARD_TRAVAUX_PRESETS]
     );
-    setReaderEmails(
-      editingChantier?.readerEmails?.length
-        ? editingChantier.readerEmails.slice(0, 3)
-        : []
+    const initialEmails = editingChantier?.readerEmails?.length
+      ? editingChantier.readerEmails.slice(0, 3)
+      : [];
+    setReaderEmails(initialEmails);
+    setReaderAccessCode(
+      normalizeDossierPinCode(editingChantier?.readerAccessCode) ||
+        (initialEmails.length > 0 ? generateDossierPinCode() : '')
     );
     setSavingBusy(false);
     setErrorMsg(null);
@@ -222,6 +232,14 @@ export function ChantierModal({
       }
     }
 
+    const cleanedEmails = clampEmailList(readerEmails, 3);
+    const effectivePin =
+      normalizeDossierPinCode(readerAccessCode) ||
+      (cleanedEmails.length > 0 ? generateDossierPinCode() : '');
+    if (effectivePin && effectivePin !== readerAccessCode) {
+      setReaderAccessCode(effectivePin);
+    }
+
     setErrorMsg(null);
     return {
       id: draftId,
@@ -229,7 +247,8 @@ export function ChantierModal({
       ownerName: editingChantier?.ownerName,
       visibility: 'private',
       readerIds: editingChantier?.readerIds || [],
-      readerEmails: clampEmailList(readerEmails, 3),
+      readerEmails: cleanedEmails,
+      readerAccessCode: effectivePin,
       numero: numero.trim(),
       projet: projet.trim(),
       entrepriseNom: entrepriseNom.trim(),
@@ -253,20 +272,26 @@ export function ChantierModal({
     }
   };
 
-  const buildEmailContent = () => {
+  const buildEmailContent = (pinOverride?: string) => {
     const refText = references.trim() || numero.trim() || draftId;
     const titre =
       [numero.trim(), projet.trim()].filter(Boolean).join(' — ') ||
       'Journal des travaux';
     const shareLink = buildShareLink();
+    const effectivePin =
+      normalizeDossierPinCode(pinOverride || readerAccessCode) ||
+      generateDossierPinCode();
     const subject = `Accès Journal des travaux — ${titre} (Réf. ${refText})`;
     const body = [
       'Bonjour,',
       '',
       `Voici vos accès à la consultation de votre journal des travaux (référence : ${refText}${projet.trim() ? ` — ${projet.trim()}` : ''}) :`,
-      shareLink,
+      `Lien d'accès au dossier : ${shareLink}`,
+      `Code d'accès (6 chiffres) : ${effectivePin}`,
       '',
-      'Connectez-vous avec cette adresse e-mail dans l’application (compte Google ou « E-mail pro » avec confirmation). Aucun code collègue supplémentaire n’est nécessaire : votre accès s’ouvrira automatiquement en lecture seule et signature pour ce dossier.',
+      'Comment vous connecter :',
+      `- Avec cette adresse e-mail via Google OU via l'onglet « E-mail pro » → « 1re connexion » en utilisant ce code à 6 chiffres (${effectivePin}) comme mot de passe de départ.`,
+      `- Si un code d'accès au dossier vous est demandé, saisissez le code : ${effectivePin} (accès en lecture seule et signature pour ce dossier uniquement).`,
       '',
       'Merci de bien vouloir consulter régulièrement et approuver les pages rédigées et terminées.',
       '',
@@ -274,7 +299,7 @@ export function ChantierModal({
         ? `Bien à vous,\n${preposeSurveillance.trim()}`
         : 'Bien à vous,',
     ].join('\n');
-    return { subject, body, shareLink };
+    return { subject, body, shareLink, effectivePin };
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -305,7 +330,7 @@ export function ChantierModal({
       const savedOk = await onSave(payload, { keepOpen: true });
       if (savedOk === false) return;
 
-      const { subject, body } = buildEmailContent();
+      const { subject, body } = buildEmailContent(payload.readerAccessCode);
       const mailtoHref = `mailto:${encodeURIComponent(emails.join(','))}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
       window.location.href = mailtoHref;
       onNotify(
@@ -320,7 +345,7 @@ export function ChantierModal({
   const handleCopyEmailText = async () => {
     const payload = validateAndBuildChantier();
     if (!payload) return;
-    const { subject, body } = buildEmailContent();
+    const { subject, body } = buildEmailContent(payload.readerAccessCode);
     try {
       await navigator.clipboard.writeText(`Objet : ${subject}\n\n${body}`);
       onNotify('Message d’accès et lien copiés dans le presse-papiers.', 'success');
@@ -330,6 +355,7 @@ export function ChantierModal({
   };
 
   const validEmailsCount = clampEmailList(readerEmails, 3).length;
+  const displayedPin = normalizeDossierPinCode(readerAccessCode);
 
   return (
     <div
@@ -665,14 +691,19 @@ export function ChantierModal({
                     Une fois encodées et enregistrées, ces adresses accèdent
                     automatiquement à <strong>ce chantier uniquement</strong>{' '}
                     (consultation à tout moment des pages En cours &amp;
-                    Terminées, signature itsme® / eID des pages terminées).
+                    Terminées, signature e-ID des pages terminées).
                   </p>
                 </div>
               </div>
               {readerEmails.length < 3 && (
                 <button
                   type="button"
-                  onClick={() => setReaderEmails((prev) => [...prev, ''])}
+                  onClick={() => {
+                    if (!normalizeDossierPinCode(readerAccessCode)) {
+                      setReaderAccessCode(generateDossierPinCode());
+                    }
+                    setReaderEmails((prev) => [...prev, '']);
+                  }}
                   className="min-h-[38px] px-3 rounded-xl border border-[#0a5b9c]/40 bg-white hover:bg-[#0a5b9c]/5 text-[#0a5b9c] text-xs font-semibold flex items-center gap-1.5 cursor-pointer shrink-0 self-start sm:self-center"
                 >
                   <Plus className="w-3.5 h-3.5" />
@@ -721,13 +752,33 @@ export function ChantierModal({
               </div>
             )}
 
+            {(readerEmails.length > 0 || displayedPin) && (
+              <div className="rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs text-slate-700">
+                  <KeyRound className="w-4 h-4 text-[#0a5b9c] shrink-0" />
+                  <span>Code d&apos;accès du dossier (6 chiffres) :</span>
+                  <span className="font-mono text-sm font-extrabold tracking-widest text-[#0a5b9c] bg-[#0a5b9c]/[0.06] px-2.5 py-1 rounded-lg border border-[#0a5b9c]/20">
+                    {displayedPin || '—'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setReaderAccessCode(generateDossierPinCode())}
+                  className="min-h-[34px] px-2.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-600 flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Nouveau code
+                </button>
+              </div>
+            )}
+
             {validEmailsCount > 0 && (
               <div className="pt-1 space-y-2.5">
                 <div className="rounded-xl border border-slate-200 bg-white p-3 text-[11px] text-slate-600 leading-relaxed whitespace-pre-line">
                   <div className="font-bold text-slate-800 mb-1">
                     Aperçu du message d&apos;invitation :
                   </div>
-                  {`Voici vos accès à la consultation de votre journal des travaux (référence : ${references.trim() || numero.trim() || draftId}${projet.trim() ? ` — ${projet.trim()}` : ''}) :\n${buildShareLink()}\n\nMerci de bien vouloir consulter régulièrement et approuver les pages rédigées et terminées.`}
+                  {buildEmailContent().body}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">

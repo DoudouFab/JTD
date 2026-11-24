@@ -311,10 +311,18 @@ export function AuthScreen({
           ) : (
             <div className="p-6 space-y-5">
               {pendingChantierId && (
-                <div className="p-3 rounded-xl bg-blue-50 border border-blue-200 text-xs text-blue-950 leading-relaxed">
-                  <strong>Consultation &amp; signature de dossier</strong> :
-                  connectez-vous avec l&apos;adresse e-mail ayant reçu le lien
-                  de partage. L&apos;accès s&apos;ouvrira automatiquement.
+                <div className="p-3 rounded-xl bg-blue-50 border border-blue-200 text-xs text-blue-950 leading-relaxed space-y-1">
+                  <div>
+                    <strong>Consultation &amp; signature de dossier</strong> :
+                    connectez-vous avec l&apos;adresse e-mail ayant reçu
+                    l&apos;invitation (compte Google ou <strong>E-mail pro</strong>).
+                  </div>
+                  <div className="text-[11px] text-blue-900">
+                    Pas de compte Google ? Cliquez sur <strong>E-mail pro</strong>{' '}
+                    → <strong>1re connexion</strong> et utilisez votre{' '}
+                    <strong>code à 6 chiffres</strong> reçu par e-mail comme
+                    mot de passe de départ.
+                  </div>
                 </div>
               )}
 
@@ -438,7 +446,9 @@ export function AuthScreen({
 
                   <p className="text-xs text-slate-500 leading-relaxed">
                     {proMode === 'first'
-                      ? 'Pour les adresses professionnelles non-Google (Exchange / Outlook, ex. @inasep.be). Un e-mail de confirmation sera envoyé.'
+                      ? pendingChantierId
+                        ? 'Première visite : entrez votre e-mail et le code à 6 chiffres reçu dans l’e-mail d’invitation (minimum 6 caractères). Un e-mail de confirmation sera envoyé.'
+                        : 'Pour les adresses professionnelles non-Google (Exchange / Outlook, ex. @inasep.be). Un e-mail de confirmation sera envoyé.'
                       : 'Connectez-vous avec votre adresse professionnelle déjà confirmée.'}
                   </p>
 

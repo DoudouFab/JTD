@@ -163,22 +163,22 @@ function renderSheetHTML(ch: Chantier, j: Journal): string {
     )
     .join('');
 
-  const sigControleurHtml = j.signatureControleur
-    ? `<div class="a4-auth-badge">
-        <div style="font-weight:700;color:#0a5b9c">✓ Authentifié via ${j.signatureControleur.method === 'itsme' ? 'itsme®' : 'Carte eID'}</div>
+  const sigControleurMetaHtml = j.signatureControleur
+    ? `<div class="a4-sign-meta">
         <div>Le ${escHtml(new Date(j.signatureControleur.signedAt).toLocaleString('fr-BE'))}</div>
-        <div style="font-family:monospace">Réf. ${escHtml(j.signatureControleur.verificationId)}</div>
+        <div class="a4-sign-mono">Réf. ${escHtml(j.signatureControleur.verificationId)}</div>
+        <div class="a4-sign-hash">SHA-256 : ${escHtml(j.signatureControleur.documentSha256)}</div>
       </div>`
     : '';
 
   const sigLecteurHtml = j.signatureLecteur
-    ? `<div class="a4-auth-badge reader">
-        <div style="font-weight:700;color:#15803d">✓ Authentifié via ${j.signatureLecteur.method === 'itsme' ? 'itsme®' : 'Carte eID'}</div>
-        <div>Signataire : ${escHtml(j.signatureLecteur.signerName)}</div>
+    ? `<div class="a4-sign-name">${escHtml(j.signatureLecteur.signerName)}</div>
+      <div class="a4-sign-meta">
         <div>Le ${escHtml(new Date(j.signatureLecteur.signedAt).toLocaleString('fr-BE'))}</div>
-        <div style="font-family:monospace">Réf. ${escHtml(j.signatureLecteur.verificationId)}</div>
+        <div class="a4-sign-mono">Réf. ${escHtml(j.signatureLecteur.verificationId)}</div>
+        <div class="a4-sign-hash">SHA-256 : ${escHtml(j.signatureLecteur.documentSha256)}</div>
       </div>`
-    : '';
+    : `<div class="a4-sign-name">${escHtml(j.sigEntrepreneur || '')}</div>`;
 
   return `
   <div class="a4-sheet">
@@ -336,14 +336,13 @@ function renderSheetHTML(ch: Chantier, j: Journal): string {
                 <img class="a4-stamp-logo" src="${INASEP_LOGO_DATA_URL}" alt="INASEP">
               </div>
               <div class="a4-sign-display">
-                <div>${escHtml(supervisorName)}</div>
-                ${sigControleurHtml}
+                <div class="a4-sign-name">${escHtml(j.signatureControleur?.signerName || supervisorName)}</div>
+                ${sigControleurMetaHtml}
               </div>
             </div>
           </td>
           <td colspan="3">
-            <div class="a4-sign-display">${escHtml(j.sigEntrepreneur || '')}</div>
-            ${sigLecteurHtml}
+            <div class="a4-sign-display">${sigLecteurHtml}</div>
           </td>
         </tr>
       </tbody>
@@ -414,12 +413,14 @@ export function exportShareableHTML(ch: Chantier, journaux: Journal[]): string {
   .a4-divider-ab, .a4-divider-ce { border-right: 1.5px solid #000 !important; }
   .a4-sign-head td { border-top: 1.5px solid #000 !important; border-bottom: 1px solid #000 !important; font-weight: 700; font-size: 8pt; text-align: center; padding: 2.5px 6px; }
   .a4-sign-body td { vertical-align: top; padding: 5px 8px; min-height: 82px; height: 82px; }
-  .a4-stamp-row { display: flex; align-items: center; gap: 8px; }
+  .a4-stamp-row { display: flex; align-items: flex-start; gap: 8px; }
   .a4-stamp-card { width: 98px; flex-shrink: 0; text-align: left; font-size: 5.5pt; line-height: 1.25; color: #1e293b; }
   .a4-stamp-logo { width: 90px; height: auto; margin-top: 3px; display: block; }
-  .a4-sign-display { font-size: 11pt; font-weight: 400; line-height: 1.25; color: #000; }
-  .a4-auth-badge { margin-top: 4px; padding: 3px 5px; border: 1px solid #0a5b9c; background-color: #f4f8fc; font-size: 6.5pt; line-height: 1.25; color: #0f172a; }
-  .a4-auth-badge.reader { border-color: #15803d; background-color: #f3fbf6; }
+  .a4-sign-display { flex: 1; min-width: 0; font-size: 9pt; font-weight: 400; line-height: 1.25; color: #000; }
+  .a4-sign-name { font-size: 9.5pt; font-weight: 700; line-height: 1.2; color: #000; }
+  .a4-sign-meta { margin-top: 3px; font-size: 6.4pt; line-height: 1.25; color: #000; }
+  .a4-sign-mono { font-family: "Courier New", Courier, monospace; font-size: 6.2pt; color: #000; }
+  .a4-sign-hash { font-family: "Courier New", Courier, monospace; font-size: 5.3pt; line-height: 1.2; color: #1e293b; word-break: break-all; }
   @media (max-width: 820px) {
     .week-banner { margin: 12px 8px 6px; }
   }

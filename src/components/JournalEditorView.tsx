@@ -35,6 +35,7 @@ import {
   type SpellIssue,
 } from '../utils/frenchSpellcheck';
 import {
+  formatSignatureMethodLabel,
   verifyJournalSignatureRecord,
   type SignatureVerificationResult,
 } from '../utils/signatureCrypto';
@@ -439,7 +440,7 @@ export function JournalEditorView({
               className="min-h-[44px] px-4 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-sm flex items-center gap-2 shadow-xs cursor-pointer"
             >
               <ShieldCheck className="w-4 h-4" />
-              Signer cette page (itsme® / eID)
+              Signer cette page (e-ID)
             </button>
           )}
 
@@ -1035,7 +1036,7 @@ export function JournalEditorView({
           <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-sm font-bold text-slate-900">
-                Signatures &amp; authentification (itsme® / eID)
+                Signatures &amp; authentification (e-ID)
               </h2>
               {needsMySignature && (
                 <button
@@ -1083,9 +1084,9 @@ export function JournalEditorView({
                     <div className="font-bold flex items-center gap-1">
                       <CheckCircle2 className="w-3.5 h-3.5" />
                       Certifié via{' '}
-                      {journal.signatureControleur.method === 'itsme'
-                        ? 'itsme®'
-                        : 'e-ID'}
+                      {formatSignatureMethodLabel(
+                        journal.signatureControleur.method
+                      )}
                     </div>
                     {journal.signatureControleur.signerEmail && (
                       <div className="text-[10px] text-slate-600 truncate">
@@ -1143,9 +1144,9 @@ export function JournalEditorView({
                     <div className="font-bold flex items-center gap-1">
                       <CheckCircle2 className="w-3.5 h-3.5" />
                       Certifié par {journal.signatureLecteur.signerName} (
-                      {journal.signatureLecteur.method === 'itsme'
-                        ? 'itsme®'
-                        : 'e-ID'}
+                      {formatSignatureMethodLabel(
+                        journal.signatureLecteur.method
+                      )}
                       )
                     </div>
                     {journal.signatureLecteur.signerEmail && (
@@ -1254,7 +1255,7 @@ export function JournalEditorView({
             className="flex-1 min-h-[44px] px-3 rounded-xl bg-[#0a5b9c] text-white font-semibold text-xs sm:text-sm flex items-center justify-center gap-1.5 cursor-pointer"
           >
             <ShieldCheck className="w-4 h-4" />
-            Signer (itsme®/eID)
+            Signer (e-ID)
           </button>
         )}
 

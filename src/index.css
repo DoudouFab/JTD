@@ -200,7 +200,7 @@
 
 .a4-stamp-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
 }
 
@@ -221,25 +221,40 @@
 }
 
 .a4-sign-display {
-  font-size: 11pt;
+  flex: 1;
+  min-width: 0;
+  font-size: 9pt;
   font-weight: 400;
   line-height: 1.25;
   color: #000000;
 }
 
-.a4-auth-badge {
-  margin-top: 4px;
-  padding: 3px 5px;
-  border: 1px solid #0a5b9c;
-  background-color: #f4f8fc;
-  font-size: 6.5pt;
-  line-height: 1.25;
-  color: #0f172a;
+.a4-sign-name {
+  font-size: 9.5pt;
+  font-weight: 700;
+  line-height: 1.2;
+  color: #000000;
 }
 
-.a4-auth-badge.reader {
-  border-color: #15803d;
-  background-color: #f3fbf6;
+.a4-sign-meta {
+  margin-top: 3px;
+  font-size: 6.4pt;
+  line-height: 1.25;
+  color: #000000;
+}
+
+.a4-sign-mono {
+  font-family: "Courier New", Courier, monospace;
+  font-size: 6.2pt;
+  color: #000000;
+}
+
+.a4-sign-hash {
+  font-family: "Courier New", Courier, monospace;
+  font-size: 5.3pt;
+  line-height: 1.2;
+  color: #1e293b;
+  word-break: break-all;
 }
 
 #printRoot {

@@ -180,7 +180,7 @@ service cloud.firestore {
       ])
       && data.keys().hasOnly([
         'id', 'ownerId', 'ownerName', 'visibility', 'readerIds', 'readerEmails',
-        'numero', 'projet', 'entrepriseNom', 'entrepriseAdresse',
+        'readerAccessCode', 'numero', 'projet', 'entrepriseNom', 'entrepriseAdresse',
         'references', 'adresseChantier', 'horaireDebut', 'horaireFin',
         'preposeSurveillance', 'postes', 'journalIds', 'createdAt', 'updatedAt'
       ])
@@ -190,6 +190,7 @@ service cloud.firestore {
       && data.visibility == 'private'
       && isStringListBounded(data.readerIds, 25)
       && (!('readerEmails' in data) || isStringListBounded(data.readerEmails, 3))
+      && (!('readerAccessCode' in data) || (data.readerAccessCode is string && data.readerAccessCode.size() <= 16 && data.readerAccessCode.matches('^$|^[0-9]{6}$')))
       && (!('journalIds' in data) || isStringListBounded(data.journalIds, 1000))
       && isStringBounded(data.numero, 100)
       && isStringBounded(data.projet, 250)
@@ -297,6 +298,38 @@ service cloud.firestore {
       && data.expiresAt is timestamp
       && data.createdAt is timestamp
       && data.updatedAt is timestamp;
+    }
+
+    function isValidDossierAccess(data) {
+      return data.keys().hasAll([
+        'id', 'code', 'chantierId', 'chantierNumero', 'chantierProjet',
+        'ownerId', 'ownerName', 'active', 'expiresAt', 'createdAt', 'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'id', 'code', 'chantierId', 'chantierNumero', 'chantierProjet',
+        'ownerId', 'ownerName', 'active', 'expiresAt', 'createdAt', 'updatedAt'
+      ])
+      && isValidShareDocId(data.id)
+      && data.code is string && data.code.size() == 6 && data.code.matches('^[0-9]{6}$')
+      && isValidId(data.chantierId)
+      && isStringBounded(data.chantierNumero, 100)
+      && isStringBounded(data.chantierProjet, 250)
+      && isValidId(data.ownerId)
+      && isStringBounded(data.ownerName, 120)
+      && data.active is bool
+      && data.expiresAt is timestamp
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function hasValidDossierAccess(chantierId, accessCode) {
+      return accessCode is string
+        && accessCode.size() == 6
+        && accessCode.matches('^[0-9]{6}$')
+        && exists(/databases/$(database)/documents/dossier_access/$(chantierId + '_' + accessCode))
+        && get(/databases/$(database)/documents/dossier_access/$(chantierId + '_' + accessCode)).data.active == true
+        && get(/databases/$(database)/documents/dossier_access/$(chantierId + '_' + accessCode)).data.chantierId == chantierId
+        && get(/databases/$(database)/documents/dossier_access/$(chantierId + '_' + accessCode)).data.expiresAt > request.time;
     }
 
     function hasActiveShare(chantierId) {
@@ -532,8 +565,48 @@ service cloud.firestore {
       allow delete: if isVerifiedActive() && isValidId(inviteCode) && existing().ownerId == request.auth.uid;
     }
 
+    match /dossier_access/{accessId} {
+      allow get: if isVerifiedUser()
+        && isValidShareDocId(accessId)
+        && (resource == null
+            || existing().ownerId == request.auth.uid
+            || (existing().active == true && existing().expiresAt > request.time));
+
+      allow list: if isVerifiedUser() && resource.data.ownerId == request.auth.uid;
+
+      allow create: if isVerifiedActive()
+        && isValidShareDocId(accessId)
+        && isValidDossierAccess(incoming())
+        && incoming().id == accessId
+        && accessId == (incoming().chantierId + '_' + incoming().code)
+        && incoming().ownerId == request.auth.uid
+        && incoming().expiresAt > request.time
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/chantiers/$(incoming().chantierId))
+        && get(/databases/$(database)/documents/chantiers/$(incoming().chantierId)).data.ownerId == request.auth.uid;
+
+      allow update: if isVerifiedActive()
+        && isValidShareDocId(accessId)
+        && isValidDossierAccess(incoming())
+        && incoming().id == existing().id
+        && incoming().code == existing().code
+        && incoming().chantierId == existing().chantierId
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && existing().ownerId == request.auth.uid
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'active', 'expiresAt', 'chantierNumero', 'chantierProjet', 'ownerName', 'updatedAt'
+        ]);
+
+      allow delete: if isVerifiedActive()
+        && isValidShareDocId(accessId)
+        && existing().ownerId == request.auth.uid;
+    }
+
     match /chantierShares/{shareId} {
-      allow get: if isVerifiedActive()
+      allow get: if isVerifiedUser()
         && isValidShareDocId(shareId)
         && ((resource == null && shareId.matches('^.+_' + request.auth.uid + '$'))
             || (resource != null && (existing().chantierOwnerId == request.auth.uid || existing().readerUid == request.auth.uid)));
@@ -541,7 +614,7 @@ service cloud.firestore {
       allow list: if isVerifiedUser()
         && (resource.data.chantierOwnerId == request.auth.uid || resource.data.readerUid == request.auth.uid);
 
-      allow create: if isVerifiedActive()
+      allow create: if isVerifiedUser()
         && isValidShareDocId(shareId)
         && isValidChantierShare(incoming())
         && shareId == (incoming().chantierId + '_' + request.auth.uid)
@@ -549,16 +622,22 @@ service cloud.firestore {
         && incoming().revoked == false
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
-        && exists(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode))
-        && get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.active == true
-        && get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.expiresAt > request.time
-        && get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.chantierId == incoming().chantierId
-        && get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.ownerId == incoming().chantierOwnerId
-        && (get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.usedByUid == ''
-            || get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.usedByUid == request.auth.uid)
-        && incoming().expiresAt == get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.expiresAt;
+        && (
+          (isVerifiedActive()
+            && exists(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode))
+            && get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.active == true
+            && get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.expiresAt > request.time
+            && get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.chantierId == incoming().chantierId
+            && get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.ownerId == incoming().chantierOwnerId
+            && (get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.usedByUid == ''
+                || get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.usedByUid == request.auth.uid)
+            && incoming().expiresAt == get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.expiresAt)
+          || (hasValidDossierAccess(incoming().chantierId, incoming().inviteCode)
+              && get(/databases/$(database)/documents/dossier_access/$(incoming().chantierId + '_' + incoming().inviteCode)).data.ownerId == incoming().chantierOwnerId
+              && incoming().expiresAt == get(/databases/$(database)/documents/dossier_access/$(incoming().chantierId + '_' + incoming().inviteCode)).data.expiresAt)
+        );
 
-      allow update: if isVerifiedActive()
+      allow update: if isVerifiedUser()
         && isValidShareDocId(shareId)
         && isValidChantierShare(incoming())
         && incoming().id == existing().id
@@ -568,17 +647,24 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
-          (existing().chantierOwnerId == request.auth.uid
+          (isVerifiedActive()
+            && existing().chantierOwnerId == request.auth.uid
             && incoming().diff(existing()).affectedKeys().hasOnly(['revoked', 'expiresAt', 'label', 'updatedAt']))
           || (existing().readerUid == request.auth.uid
               && incoming().revoked == false
-              && exists(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode))
-              && get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.active == true
-              && get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.expiresAt > request.time
-              && get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.chantierId == incoming().chantierId
-              && (get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.usedByUid == ''
-                  || get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.usedByUid == request.auth.uid)
-              && incoming().expiresAt == get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.expiresAt
+              && (
+                (isVerifiedActive()
+                  && exists(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode))
+                  && get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.active == true
+                  && get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.expiresAt > request.time
+                  && get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.chantierId == incoming().chantierId
+                  && (get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.usedByUid == ''
+                      || get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.usedByUid == request.auth.uid)
+                  && incoming().expiresAt == get(/databases/$(database)/documents/shareInvites/$(incoming().inviteCode)).data.expiresAt)
+                || (hasValidDossierAccess(incoming().chantierId, incoming().inviteCode)
+                    && get(/databases/$(database)/documents/dossier_access/$(incoming().chantierId + '_' + incoming().inviteCode)).data.ownerId == incoming().chantierOwnerId
+                    && incoming().expiresAt == get(/databases/$(database)/documents/dossier_access/$(incoming().chantierId + '_' + incoming().inviteCode)).data.expiresAt)
+              )
               && incoming().diff(existing()).affectedKeys().hasOnly(['inviteCode', 'expiresAt', 'revoked', 'label', 'readerName', 'updatedAt']))
         );
 
@@ -601,7 +687,8 @@ service cloud.firestore {
       allow get: if isVerifiedUser()
         && isValidId(chantierId)
         && (
-          (isVerifiedActive() && (resource == null || existing().ownerId == request.auth.uid || hasActiveShare(chantierId)))
+          (isVerifiedActive() && (resource == null || existing().ownerId == request.auth.uid))
+          || (resource != null && hasActiveShare(chantierId))
           || (resource != null && isEmailInChantierList(existing()))
         );
 
@@ -619,7 +706,7 @@ service cloud.firestore {
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
 
-      allow update: if isVerifiedActive()
+      allow update: if isVerifiedUser()
         && isValidId(chantierId)
         && isValidChantier(incoming())
         && incoming().id == existing().id
@@ -627,9 +714,10 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
-          (existing().ownerId == request.auth.uid
+          (isVerifiedActive()
+            && existing().ownerId == request.auth.uid
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'readerIds', 'readerEmails', 'journalIds', 'numero', 'projet', 'entrepriseNom', 'entrepriseAdresse',
+              'readerIds', 'readerEmails', 'readerAccessCode', 'journalIds', 'numero', 'projet', 'entrepriseNom', 'entrepriseAdresse',
               'references', 'adresseChantier', 'horaireDebut', 'horaireFin',
               'preposeSurveillance', 'postes', 'updatedAt'
             ]))
@@ -649,7 +737,8 @@ service cloud.firestore {
           && isValidId(chantierId)
           && isValidId(journalId)
           && (
-            (isVerifiedActive() && (get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid || hasActiveShare(chantierId)))
+            (isVerifiedActive() && get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid)
+            || hasActiveShare(chantierId)
             || isEmailReaderOfChantier(chantierId)
           );
 
@@ -766,7 +855,7 @@ service cloud.firestore {
                         'updatedAt'
                       ]))
                 ))
-            || ((isEmailReaderOfChantier(chantierId) || (isVerifiedActive() && hasActiveShare(chantierId)))
+            || ((isEmailReaderOfChantier(chantierId) || hasActiveShare(chantierId))
                 && existing().status == 'completed'
                 && (!('signatureLecteur' in existing()) || !isSignedRecordPresent(existing().signatureLecteur))
                 && incoming().signatureLecteur != null
@@ -778,8 +867,7 @@ service cloud.firestore {
                   || get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid
                 )
                 && incoming().diff(existing()).affectedKeys().hasOnly(['chantierReaderIds', 'chantierReaderEmails', 'updatedAt']))
-            || (isVerifiedActive()
-                && hasActiveShare(chantierId)
+            || (hasActiveShare(chantierId)
                 && (!('chantierReaderIds' in existing()) || incoming().chantierReaderIds.hasAll(existing().chantierReaderIds))
                 && (!('chantierReaderIds' in existing()) || incoming().chantierReaderIds.size() <= existing().chantierReaderIds.size() + 1)
                 && request.auth.uid in incoming().chantierReaderIds

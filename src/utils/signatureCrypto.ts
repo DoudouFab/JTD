@@ -26,8 +26,9 @@ export interface SignatureVerificationResult {
   reason?: string;
 }
 
-export function formatSignatureMethodLabel(method: SignatureMethod): string {
-  return method === 'itsme' ? 'itsme®' : 'e-ID';
+export function formatSignatureMethodLabel(method?: SignatureMethod | string): string {
+  void method;
+  return 'e-ID';
 }
 
 function bufToHex(buffer: ArrayBuffer): string {
@@ -102,7 +103,7 @@ export async function computeJournalSha256(
 function buildCanonicalSignaturePayload(params: {
   verificationId: string;
   role: 'controleur' | 'lecteur';
-  method: SignatureMethod;
+  method: SignatureMethod | string;
   signerUid: string;
   signerName: string;
   documentSha256: string;
@@ -177,8 +178,7 @@ export async function createVerifiedSigningSession(params: {
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('')
     .toUpperCase();
-  const prefix = params.method === 'itsme' ? 'ITSME' : 'EID';
-  const verificationId = `${prefix}-${verifiedAt.slice(0, 10).replace(/-/g, '')}-${randHex}`;
+  const verificationId = `EID-${verifiedAt.slice(0, 10).replace(/-/g, '')}-${randHex}`;
 
   let webAuthnUsed = false;
   if (params.useWebAuthn) {

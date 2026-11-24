@@ -23,7 +23,10 @@ import {
   weekKey,
   weekRangeLabel,
 } from '../utils/dates';
-import type { VerifiedSigningSession } from '../utils/signatureCrypto';
+import {
+  formatSignatureMethodLabel,
+  type VerifiedSigningSession,
+} from '../utils/signatureCrypto';
 
 interface ChantierDetailViewProps {
   chantier: Chantier;
@@ -242,7 +245,7 @@ export function ChantierDetailView({
               (ce dossier uniquement) : vous pouvez consulter à tout moment les
               pages <strong>En cours</strong> et les pages{' '}
               <strong>Terminées</strong>, et signer (via{' '}
-              <strong>itsme® / eID</strong>) uniquement les pages marquées{' '}
+              <strong>e-ID</strong>) uniquement les pages marquées{' '}
               <strong>Page terminée</strong>. Une fois signée par un membre, la
               page n&apos;est plus modifiable. Le PDF complet de la semaine est
               téléchargeable une fois signé par les deux parties.
@@ -264,9 +267,7 @@ export function ChantierDetailView({
             <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" />
             <span>
               Vérification active (
-              <strong>
-                {signingSession.method === 'itsme' ? 'itsme®' : 'Carte eID'}
-              </strong>
+              <strong>{formatSignatureMethodLabel(signingSession.method)}</strong>
               ) pour <strong>{signingSession.signerName}</strong> · Réf.{' '}
               <span className="font-mono">{signingSession.verificationId}</span>{' '}
               — vous pouvez signer les pages sans nouvelle vérification.
@@ -470,8 +471,8 @@ export function ChantierDetailView({
                       >
                         <ShieldCheck className="w-4 h-4" />
                         {allCompleted
-                          ? `Signer la semaine (${completedUnsignedInWeek.length}p · itsme®/eID)`
-                          : `Signer terminées (${completedUnsignedInWeek.length}p · itsme®/eID)`}
+                          ? `Signer la semaine (${completedUnsignedInWeek.length}p · e-ID)`
+                          : `Signer terminées (${completedUnsignedInWeek.length}p · e-ID)`}
                       </button>
                     )}
 
@@ -591,7 +592,7 @@ export function ChantierDetailView({
                                 <CheckCircle2 className="w-3.5 h-3.5" />
                                 Contrôleur :{' '}
                                 {isSignedCtrl
-                                  ? `${j.signatureControleur!.signerName} (${j.signatureControleur!.method === 'itsme' ? 'itsme®' : 'eID'})`
+                                  ? `${j.signatureControleur!.signerName} (${formatSignatureMethodLabel(j.signatureControleur!.method)})`
                                   : 'Non signé'}
                               </span>
                               <span
@@ -604,7 +605,7 @@ export function ChantierDetailView({
                                 <CheckCircle2 className="w-3.5 h-3.5" />
                                 Lecteur :{' '}
                                 {isSignedReader
-                                  ? `${j.signatureLecteur!.signerName} (${j.signatureLecteur!.method === 'itsme' ? 'itsme®' : 'eID'})`
+                                  ? `${j.signatureLecteur!.signerName} (${formatSignatureMethodLabel(j.signatureLecteur!.method)})`
                                   : 'Non signé'}
                               </span>
                             </div>

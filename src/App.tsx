@@ -60,6 +60,7 @@ import {
 import { generateAndDeliverPdf, type PdfProgress } from './utils/pdfExport';
 import { exportShareableHTML } from './utils/shareHtml';
 import {
+  formatSignatureMethodLabel,
   signJournalPageWithSession,
   type VerifiedSigningSession,
 } from './utils/signatureCrypto';
@@ -163,7 +164,12 @@ export default function App() {
         const param = new URLSearchParams(window.location.search).get(
           'chantier'
         );
-        return param ? param.trim() : null;
+        if (param && param.trim()) {
+          const clean = param.trim();
+          localStorage.setItem('jt_pending_chantier_id', clean);
+          return clean;
+        }
+        return localStorage.getItem('jt_pending_chantier_id') || null;
       } catch {
         return null;
       }
@@ -172,6 +178,19 @@ export default function App() {
   const pendingChantierIdRef = useRef<string | null>(pendingChantierId);
   pendingChantierIdRef.current = pendingChantierId;
   const hasCloudChantiersSyncedRef = useRef(false);
+
+  const updatePendingChantierId = useCallback((nextId: string | null) => {
+    setPendingChantierId(nextId);
+    try {
+      if (nextId) {
+        localStorage.setItem('jt_pending_chantier_id', nextId);
+      } else {
+        localStorage.removeItem('jt_pending_chantier_id');
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
 
   const [confirmState, setConfirmState] = useState<{
     title: string;
@@ -544,7 +563,7 @@ export default function App() {
 
     const found = chantiers.find((c) => c.id === pendingChantierId);
     if (found) {
-      setPendingChantierId(null);
+      updatePendingChantierId(null);
       try {
         const cleanedUrl = new URL(window.location.href);
         cleanedUrl.searchParams.delete('chantier');
@@ -559,7 +578,7 @@ export default function App() {
     }
 
     if (hasCloudChantiersSyncedRef.current && !refreshingChantiers) {
-      setPendingChantierId(null);
+      updatePendingChantierId(null);
       try {
         const cleanedUrl = new URL(window.location.href);
         cleanedUrl.searchParams.delete('chantier');
@@ -581,6 +600,7 @@ export default function App() {
     chantiers,
     refreshingChantiers,
     notify,
+    updatePendingChantierId,
   ]);
 
   const currentChantier = useMemo(
@@ -1125,7 +1145,7 @@ export default function App() {
       }
 
       notify(
-        `${journalsToSign.length} page${journalsToSign.length > 1 ? 's' : ''} signée${journalsToSign.length > 1 ? 's' : ''} (${session.method === 'itsme' ? 'itsme®' : 'Carte eID'}).`,
+        `${journalsToSign.length} page${journalsToSign.length > 1 ? 's' : ''} signée${journalsToSign.length > 1 ? 's' : ''} (${formatSignatureMethodLabel(session.method)}).`,
         'success'
       );
     },
@@ -1420,6 +1440,11 @@ export default function App() {
           pendingChantierId={pendingChantierId}
           onActivated={() => {
             setAccessState('approved');
+            setAccessErrorMessage(null);
+          }}
+          onDossierReaderActivated={(chantierId) => {
+            updatePendingChantierId(chantierId);
+            setAccessState('reader_only');
             setAccessErrorMessage(null);
           }}
           onPendingCreated={() => {

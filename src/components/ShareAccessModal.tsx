@@ -182,7 +182,7 @@ export function ShareAccessModal({
               Le destinataire (compte autorisé dans l&apos;onglet Accès) pourra
               consulter à tout moment les jours <strong>En cours</strong> et{' '}
               <strong>Terminés</strong> de ce chantier uniquement, signer via{' '}
-              <strong>itsme®/eID</strong> les pages terminées (ce qui les
+              <strong>e-ID</strong> les pages terminées (ce qui les
               verrouille en modification), puis télécharger le PDF hebdomadaire
               une fois signé par les deux parties.
             </p>

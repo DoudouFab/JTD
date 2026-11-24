@@ -235,7 +235,7 @@ export async function generateAndDeliverPdf(
         ...uniqueVerifIds,
         ...shaList,
       ].join(', '),
-      creator: 'Mes JDT (INASEP) — Signatures certifiées itsme® / e-ID (SHA-256 + ECDSA P-256)',
+      creator: 'Mes JDT (INASEP) — Signatures e-ID (SHA-256 + ECDSA P-256)',
     });
 
     const xmpBody = [

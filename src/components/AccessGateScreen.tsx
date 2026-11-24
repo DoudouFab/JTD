@@ -1,10 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { signOut, type User } from 'firebase/auth';
 import {
   AlertCircle,
+  ChevronDown,
   Clock,
   ExternalLink,
+  FolderOpen,
   KeyRound,
+  Lock,
   LogOut,
   RefreshCw,
   ShieldAlert,
@@ -14,6 +17,7 @@ import { auth, FIRESTORE_QUOTA_URL } from '../firebase';
 import { APP_SIGNATURE, type AccessUserRecord } from '../types';
 import {
   activateWithPersonalCode,
+  redeemDossierPinCode,
   requestAccessWithoutCode,
 } from '../utils/firestoreService';
 import { AppLogo } from './AppLogo';
@@ -32,6 +36,7 @@ interface AccessGateScreenProps {
   pendingInviteCode?: string | null;
   pendingChantierId?: string | null;
   onActivated: (record: AccessUserRecord) => void;
+  onDossierReaderActivated: (chantierId: string) => void;
   onPendingCreated: (record: AccessUserRecord) => void;
   onRetryCheck: () => Promise<void>;
   onNotify: (msg: string, tone?: 'default' | 'success' | 'error') => void;
@@ -44,6 +49,7 @@ export function AccessGateScreen({
   pendingInviteCode,
   pendingChantierId,
   onActivated,
+  onDossierReaderActivated,
   onPendingCreated,
   onRetryCheck,
   onNotify,
@@ -51,6 +57,25 @@ export function AccessGateScreen({
   const [personalCode, setPersonalCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+
+  const [dossierInput, setDossierInput] = useState(pendingChantierId || '');
+  const [dossierCode, setDossierCode] = useState('');
+  const [dossierBusy, setDossierBusy] = useState(false);
+  const [dossierError, setDossierError] = useState<string | null>(null);
+  const [showDossierPanel, setShowDossierPanel] = useState(
+    Boolean(pendingChantierId)
+  );
+  const [showColleaguePanel, setShowColleaguePanel] = useState(
+    !pendingChantierId
+  );
+
+  useEffect(() => {
+    if (pendingChantierId) {
+      setDossierInput(pendingChantierId);
+      setShowDossierPanel(true);
+      setShowColleaguePanel(false);
+    }
+  }, [pendingChantierId]);
 
   const handleValidateCode = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -76,6 +101,43 @@ export function AccessGateScreen({
       );
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleRedeemDossierPin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setDossierError(null);
+    const target = (dossierInput || pendingChantierId || '').trim();
+    const digits = dossierCode.replace(/\D/g, '');
+    if (!target) {
+      setDossierError(
+        'Collez le lien complet reçu par e-mail (ou l’identifiant du chantier).'
+      );
+      return;
+    }
+    if (digits.length !== 6) {
+      setDossierError(
+        'Le code d’accès du dossier doit comporter exactement 6 chiffres.'
+      );
+      return;
+    }
+
+    setDossierBusy(true);
+    try {
+      const res = await redeemDossierPinCode(target, digits, user);
+      onNotify(
+        `Accès lecture & signature activé pour « ${res.chantierProjet} ».`,
+        'success'
+      );
+      onDossierReaderActivated(res.chantierId);
+    } catch (err) {
+      setDossierError(
+        err instanceof Error
+          ? err.message
+          : 'Impossible de déverrouiller ce dossier avec ce code à 6 chiffres.'
+      );
+    } finally {
+      setDossierBusy(false);
     }
   };
 
@@ -123,24 +185,6 @@ export function AccessGateScreen({
                   ). Dès que votre appareil est activé par l&apos;administrateur
                   (code personnel ou validation ci-dessous), le dossier partagé
                   s&apos;ouvrira automatiquement.
-                </div>
-              )}
-
-            {pendingChantierId &&
-              (gateState === 'needs_code' || gateState === 'pending') && (
-                <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-950 leading-relaxed space-y-1.5">
-                  <div>
-                    <strong>Accès à un dossier partagé par e-mail</strong> :
-                    aucun code collègue n&apos;est requis si le contrôleur a
-                    encodé votre e-mail dans ce chantier.
-                  </div>
-                  <div>
-                    L&apos;adresse actuellement connectée (
-                    <span className="font-semibold">{user.email}</span>) ne
-                    figure pas encore sur ce dossier : connectez-vous avec
-                    l&apos;adresse e-mail exacte ayant reçu l&apos;invitation ou
-                    cliquez sur <strong>Actualiser</strong> une fois ajoutée.
-                  </div>
                 </div>
               )}
 
@@ -270,96 +314,219 @@ export function AccessGateScreen({
               </div>
             )}
 
-            {/* Personal Code Validation + Pending State */}
+            {/* Main Access Options (Single-Dossier Entrepreneur Code + Colleague Personal Code) */}
             {(gateState === 'needs_code' || gateState === 'pending') && (
               <>
-                {gateState === 'pending' && (
-                  <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200 space-y-2.5">
+                {showDossierPanel ? (
+                  <div className="rounded-2xl border border-[#0a5b9c]/25 bg-[#0a5b9c]/[0.03] p-4 space-y-3">
                     <div className="flex items-start gap-2.5">
-                      <Clock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-                      <div className="text-xs text-amber-950 leading-relaxed">
-                        <strong>Demande en attente</strong> : votre fiche a bien
-                        été transmise à l&apos;administrateur. Dès qu&apos;il
-                        vous autorise, cliquez sur Actualiser (ou saisissez
-                        votre code personnel ci-dessous).
+                      <div className="w-8 h-8 rounded-lg bg-[#0a5b9c]/10 text-[#0a5b9c] flex items-center justify-center shrink-0 mt-0.5">
+                        <Lock className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h2 className="text-sm font-bold text-slate-900">
+                          Accès au dossier partagé (lecture &amp; signature)
+                        </h2>
+                        <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
+                          Entrez le <strong>code d&apos;accès à 6 chiffres</strong>{' '}
+                          figurant dans l&apos;e-mail d&apos;invitation pour
+                          consulter et signer <strong>ce chantier uniquement</strong>.
+                        </p>
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={async () => {
-                        setBusy(true);
-                        try {
-                          await onRetryCheck();
-                        } finally {
-                          setBusy(false);
+
+                    <form onSubmit={handleRedeemDossierPin} className="space-y-3">
+                      {!pendingChantierId ? (
+                        <div>
+                          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">
+                            Lien ou identifiant du dossier
+                          </label>
+                          <input
+                            type="text"
+                            value={dossierInput}
+                            onChange={(e) => setDossierInput(e.target.value)}
+                            placeholder="Collez le lien reçu par e-mail"
+                            className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 bg-white text-xs text-slate-900 focus:outline-none focus:border-[#0a5b9c]"
+                          />
+                        </div>
+                      ) : (
+                        <div className="px-3 py-2 rounded-xl bg-white border border-slate-200 text-xs text-slate-600 flex items-center gap-2">
+                          <FolderOpen className="w-3.5 h-3.5 text-[#0a5b9c] shrink-0" />
+                          <span className="truncate">
+                            Dossier détecté :{' '}
+                            <span className="font-mono font-semibold text-slate-800">
+                              {pendingChantierId}
+                            </span>
+                          </span>
+                        </div>
+                      )}
+
+                      <div>
+                        <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">
+                          Code d&apos;accès à 6 chiffres (reçu par e-mail)
+                        </label>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={6}
+                          value={dossierCode}
+                          onChange={(e) =>
+                            setDossierCode(
+                              e.target.value.replace(/\D/g, '').slice(0, 6)
+                            )
+                          }
+                          placeholder="ex. 482910"
+                          autoComplete="one-time-code"
+                          className="w-full min-h-[46px] px-3.5 rounded-xl border border-slate-200 bg-white font-mono text-lg font-bold tracking-[0.25em] text-center text-slate-900 focus:outline-none focus:border-[#0a5b9c]"
+                        />
+                      </div>
+
+                      {dossierError && (
+                        <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800 flex items-start gap-2">
+                          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                          <span>{dossierError}</span>
+                        </div>
+                      )}
+
+                      <button
+                        type="submit"
+                        disabled={
+                          dossierBusy ||
+                          dossierCode.replace(/\D/g, '').length !== 6
                         }
-                      }}
-                      className="w-full min-h-[40px] rounded-xl bg-amber-700 hover:bg-amber-800 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
-                    >
-                      <RefreshCw
-                        className={`w-3.5 h-3.5 ${busy ? 'animate-spin' : ''}`}
-                      />
-                      Actualiser
-                    </button>
+                        className="w-full min-h-[46px] rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-bold text-sm flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                      >
+                        <KeyRound className="w-4 h-4" />
+                        {dossierBusy
+                          ? 'Vérification du dossier…'
+                          : 'Ouvrir ce dossier'}
+                      </button>
+                    </form>
+
+                    {!pendingChantierId && (
+                      <button
+                        type="button"
+                        onClick={() => setShowDossierPanel(false)}
+                        className="w-full text-xs font-semibold text-slate-500 hover:text-slate-800 cursor-pointer"
+                      >
+                        Masquer l&apos;accès par dossier
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowDossierPanel(true);
+                      setShowColleaguePanel(false);
+                    }}
+                    className="w-full min-h-[44px] px-3.5 rounded-xl border border-[#0a5b9c]/30 bg-[#0a5b9c]/[0.04] hover:bg-[#0a5b9c]/10 text-[#0a5b9c] text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <Lock className="w-3.5 h-3.5" />
+                    Entrepreneur invité sur un chantier ? Entrer un code à 6 chiffres
+                  </button>
+                )}
+
+                {pendingChantierId && !showColleaguePanel ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowColleaguePanel(true)}
+                    className="w-full min-h-[40px] px-3 rounded-xl border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-600 flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <ChevronDown className="w-3.5 h-3.5" />
+                    Vous êtes collègue INASEP ? Validation par code personnel
+                  </button>
+                ) : (
+                  <div className="space-y-4 pt-1">
+                    {gateState === 'pending' && (
+                      <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200 space-y-2.5">
+                        <div className="flex items-start gap-2.5">
+                          <Clock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                          <div className="text-xs text-amber-950 leading-relaxed">
+                            <strong>Demande en attente</strong> : votre fiche a
+                            bien été transmise à l&apos;administrateur. Dès
+                            qu&apos;il vous autorise, cliquez sur Actualiser (ou
+                            saisissez votre code personnel ci-dessous).
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={async () => {
+                            setBusy(true);
+                            try {
+                              await onRetryCheck();
+                            } finally {
+                              setBusy(false);
+                            }
+                          }}
+                          className="w-full min-h-[40px] rounded-xl bg-amber-700 hover:bg-amber-800 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
+                        >
+                          <RefreshCw
+                            className={`w-3.5 h-3.5 ${busy ? 'animate-spin' : ''}`}
+                          />
+                          Actualiser
+                        </button>
+                      </div>
+                    )}
+
+                    <div className="space-y-1">
+                      <h2 className="text-base font-bold text-slate-900">
+                        Validation par code personnel (collègues INASEP)
+                      </h2>
+                      <p className="text-xs text-slate-500 leading-relaxed">
+                        Réservé aux collègues INASEP disposant d&apos;un accès
+                        complet. Saisissez le code personnel fourni par
+                        l&apos;administrateur.
+                      </p>
+                    </div>
+
+                    <form onSubmit={handleValidateCode} className="space-y-3">
+                      <div>
+                        <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">
+                          Code personnel
+                        </label>
+                        <input
+                          type="text"
+                          value={personalCode}
+                          onChange={(e) => setPersonalCode(e.target.value)}
+                          placeholder="Ex. INASEP-2026"
+                          autoComplete="one-time-code"
+                          className="w-full min-h-[46px] px-3.5 rounded-xl border border-slate-200 bg-slate-50 font-mono text-base tracking-wider text-slate-900 focus:outline-none focus:border-[#0a5b9c] focus:bg-white"
+                        />
+                      </div>
+
+                      {formError && (
+                        <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800 flex items-start gap-2">
+                          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                          <span>{formError}</span>
+                        </div>
+                      )}
+
+                      <button
+                        type="submit"
+                        disabled={busy || personalCode.trim().length < 3}
+                        className="w-full min-h-[46px] rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-bold text-sm flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                      >
+                        <KeyRound className="w-4 h-4" />
+                        Activer cet appareil
+                      </button>
+                    </form>
+
+                    {gateState === 'needs_code' && (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={handleRequestAccess}
+                        className="w-full min-h-[42px] rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold cursor-pointer disabled:opacity-60"
+                      >
+                        Pas encore de code ? Demander l&apos;accès collègue
+                      </button>
+                    )}
                   </div>
                 )}
 
-                <div className="space-y-1">
-                  <h2 className="text-base font-bold text-slate-900">
-                    Validation par code personnel
-                  </h2>
-                  <p className="text-xs text-slate-500 leading-relaxed">
-                    Saisissez le code personnel fourni par l&apos;administrateur.
-                    Cette étape n&apos;est demandée qu&apos;une seule fois sur
-                    cet appareil.
-                  </p>
-                </div>
-
-                <form onSubmit={handleValidateCode} className="space-y-3">
-                  <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">
-                      Code personnel
-                    </label>
-                    <input
-                      type="text"
-                      value={personalCode}
-                      onChange={(e) => setPersonalCode(e.target.value)}
-                      placeholder="Ex. 482910"
-                      autoComplete="one-time-code"
-                      className="w-full min-h-[46px] px-3.5 rounded-xl border border-slate-200 bg-slate-50 font-mono text-base tracking-wider text-slate-900 focus:outline-none focus:border-[#0a5b9c] focus:bg-white"
-                    />
-                  </div>
-
-                  {formError && (
-                    <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800 flex items-start gap-2">
-                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                      <span>{formError}</span>
-                    </div>
-                  )}
-
-                  <button
-                    type="submit"
-                    disabled={busy || personalCode.trim().length < 3}
-                    className="w-full min-h-[46px] rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-bold text-sm flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
-                  >
-                    <KeyRound className="w-4 h-4" />
-                    Activer cet appareil
-                  </button>
-                </form>
-
-                <div className="pt-3 border-t border-slate-100 flex flex-col gap-2">
-                  {gateState === 'needs_code' && (
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={handleRequestAccess}
-                      className="w-full min-h-[42px] rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold cursor-pointer disabled:opacity-60"
-                    >
-                      Pas encore de code ? Demander l&apos;accès
-                    </button>
-                  )}
-
+                <div className="pt-2 border-t border-slate-100">
                   <button
                     type="button"
                     onClick={() => signOut(auth)}
@@ -381,3 +548,4 @@ export function AccessGateScreen({
     </div>
   );
 }
+

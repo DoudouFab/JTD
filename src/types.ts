@@ -40,7 +40,7 @@ export interface UserProfile {
   defaultHoraireFin: string;
 }
 
-export type SignatureMethod = 'itsme' | 'eid';
+export type SignatureMethod = 'eid';
 
 export interface PageSignatureRecord {
   role: 'controleur' | 'lecteur';
@@ -110,6 +110,7 @@ export interface Chantier {
   visibility?: 'private';
   readerIds?: string[];
   readerEmails?: string[];
+  readerAccessCode?: string;
   numero: string;
   projet: string;
   entrepriseNom: string;

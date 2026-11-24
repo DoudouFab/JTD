@@ -101,6 +101,35 @@ export function clampEmailList(val: unknown, maxItems = 3): string[] {
   return out;
 }
 
+export function generateDossierPinCode(): string {
+  const bytes = crypto.getRandomValues(new Uint32Array(1));
+  const num = 100000 + (bytes[0] % 900000);
+  return String(num);
+}
+
+export function normalizeDossierPinCode(val: unknown): string {
+  const digits = String(val ?? '').replace(/\D/g, '');
+  return digits.length === 6 ? digits : '';
+}
+
+export function extractChantierIdFromInput(rawInput: string): string {
+  const trimmed = rawInput.trim();
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed) || trimmed.includes('chantier=')) {
+    try {
+      const url = new URL(
+        trimmed.startsWith('http') ? trimmed : `https://local.app/?${trimmed.replace(/^\?/, '')}`
+      );
+      const param = url.searchParams.get('chantier');
+      if (param) return sanitizeDocId(param.trim());
+    } catch {
+      const m = /[?&]chantier=([a-zA-Z0-9_-]+)/.exec(trimmed);
+      if (m?.[1]) return sanitizeDocId(m[1]);
+    }
+  }
+  return sanitizeDocId(trimmed);
+}
+
 // ---------------------------------------------------------------------------
 // Offline Cache Helpers (localStorage — 0 Firestore reads on cached reload)
 // ---------------------------------------------------------------------------
@@ -348,18 +377,22 @@ export async function checkDossierReaderStartup(
   targetChantierId?: string | null
 ): Promise<boolean> {
   const emailLower = (user.email || '').trim().toLowerCase();
-  if (!emailLower) return false;
+  if (!emailLower && !targetChantierId) return false;
 
   try {
     const checks: Array<Promise<boolean>> = [
-      getDocsFromServer(
-        query(
-          collection(db, 'chantiers'),
-          where('readerEmails', 'array-contains', emailLower)
-        )
-      )
-        .then((snap) => !snap.empty)
-        .catch(() => false),
+      ...(emailLower
+        ? [
+            getDocsFromServer(
+              query(
+                collection(db, 'chantiers'),
+                where('readerEmails', 'array-contains', emailLower)
+              )
+            )
+              .then((snap) => !snap.empty)
+              .catch(() => false),
+          ]
+        : []),
       getDocsFromServer(
         query(
           collection(db, 'chantierShares'),
@@ -378,12 +411,28 @@ export async function checkDossierReaderStartup(
     ];
 
     if (targetChantierId) {
+      const cleanId = sanitizeDocId(targetChantierId);
       checks.push(
-        getDocFromServer(doc(db, 'chantiers', sanitizeDocId(targetChantierId)))
+        getDocFromServer(doc(db, 'chantierShares', `${cleanId}_${user.uid}`))
           .then((snap) => {
             if (!snap.exists()) return false;
-            const emails = clampEmailList(snap.data().readerEmails, 3);
-            return emails.includes(emailLower);
+            const raw = snap.data();
+            const exp = raw.expiresAt?.toMillis?.() ?? 0;
+            return raw.revoked === false && exp > Date.now();
+          })
+          .catch(() => false),
+        getDocFromServer(doc(db, 'chantiers', cleanId))
+          .then((snap) => {
+            if (!snap.exists()) return false;
+            const data = snap.data();
+            const emails = clampEmailList(data.readerEmails, 3);
+            const readerIds = Array.isArray(data.readerIds)
+              ? data.readerIds.map(String)
+              : [];
+            return (
+              (Boolean(emailLower) && emails.includes(emailLower)) ||
+              readerIds.includes(user.uid)
+            );
           })
           .catch(() => false)
       );
@@ -808,6 +857,9 @@ function sanitizeChantierPayload(
     /^[a-zA-Z0-9_-]+$/.test(id)
   );
   const readerEmails = clampEmailList(ch.readerEmails || [], 3);
+  const normalizedPin = normalizeDossierPinCode(ch.readerAccessCode);
+  const readerAccessCode =
+    normalizedPin || (readerEmails.length > 0 ? generateDossierPinCode() : '');
 
   return {
     id: sanitizeDocId(ch.id),
@@ -816,6 +868,7 @@ function sanitizeChantierPayload(
     visibility: 'private' as const,
     readerIds,
     readerEmails,
+    readerAccessCode,
     journalIds: clampStrList(
       (ch as Chantier & { journalIds?: string[] }).journalIds || [],
       1000,
@@ -1075,6 +1128,67 @@ export async function fetchChantierJournauxOnce(
   }
 }
 
+async function syncDossierAccessGrant(
+  chantier: Chantier,
+  user: User,
+  ownerName: string,
+  readerAccessCode: string
+): Promise<void> {
+  const cId = sanitizeDocId(chantier.id);
+  try {
+    const existingSnap = await getDocs(
+      query(collection(db, 'dossier_access'), where('ownerId', '==', user.uid))
+    );
+    const chantierDocs = existingSnap.docs.filter(
+      (d) => d.data().chantierId === cId
+    );
+    for (const d of chantierDocs) {
+      if (d.data().code !== readerAccessCode && d.data().active === true) {
+        await updateDoc(d.ref, {
+          active: false,
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
+      }
+    }
+
+    if (!readerAccessCode) return;
+
+    const accessId = `${cId}_${readerAccessCode}`;
+    const ref = doc(db, 'dossier_access', accessId);
+    const expiresDate = new Date();
+    expiresDate.setMonth(expiresDate.getMonth() + 36);
+    const expiresTs = Timestamp.fromDate(expiresDate);
+
+    const matchExisting = chantierDocs.find((d) => d.id === accessId);
+    if (!matchExisting) {
+      await setDoc(ref, {
+        id: accessId,
+        code: readerAccessCode,
+        chantierId: cId,
+        chantierNumero: clampStr(chantier.numero, 100),
+        chantierProjet: clampStr(chantier.projet, 250),
+        ownerId: user.uid,
+        ownerName: clampStr(ownerName, 120),
+        active: true,
+        expiresAt: expiresTs,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await updateDoc(ref, {
+        active: true,
+        expiresAt: expiresTs,
+        chantierNumero: clampStr(chantier.numero, 100),
+        chantierProjet: clampStr(chantier.projet, 250),
+        ownerName: clampStr(ownerName, 120),
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch {
+    // Non-fatal if offline or transient error
+  }
+}
+
 export async function saveChantierCloud(
   chantier: Chantier,
   user: User
@@ -1087,17 +1201,20 @@ export async function saveChantierCloud(
     user.email?.split('@')[0] ||
     'Utilisateur';
   const readerEmails = clampEmailList(chantier.readerEmails || [], 3);
+  const normalizedPin = normalizeDossierPinCode(chantier.readerAccessCode);
+  const readerAccessCode =
+    normalizedPin || (readerEmails.length > 0 ? generateDossierPinCode() : '');
 
   try {
     if (!chantier.ownerId) {
       const payload = sanitizeChantierPayload(
-        { ...chantier, id, readerEmails },
+        { ...chantier, id, readerEmails, readerAccessCode },
         user.uid,
         ownerName,
         true
       );
       await setDoc(ref, payload);
-      return {
+      const savedNew: Chantier = {
         ...chantier,
         id,
         ownerId: user.uid,
@@ -1105,11 +1222,17 @@ export async function saveChantierCloud(
         visibility: 'private',
         readerIds: payload.readerIds,
         readerEmails,
+        readerAccessCode,
       };
+      if (readerAccessCode) {
+        await syncDossierAccessGrant(savedNew, user, ownerName, readerAccessCode);
+      }
+      return savedNew;
     }
 
     const updateFields: Record<string, unknown> = {
       readerEmails,
+      readerAccessCode,
       numero: clampStr(chantier.numero, 100),
       projet: clampStr(chantier.projet, 250),
       entrepriseNom: clampStr(chantier.entrepriseNom, 200),
@@ -1155,7 +1278,7 @@ export async function saveChantierCloud(
         // Non-fatal if offline; new journals will read chantier.readerEmails
       }
 
-      return {
+      const savedExisting: Chantier = {
         ...chantier,
         id,
         ownerId: chantier.ownerId,
@@ -1163,18 +1286,21 @@ export async function saveChantierCloud(
         visibility: 'private',
         readerIds: chantier.readerIds || [],
         readerEmails,
+        readerAccessCode,
       };
+      await syncDossierAccessGrant(savedExisting, user, ownerName, readerAccessCode);
+      return savedExisting;
     } catch (updateErr) {
       const code = (updateErr as { code?: string })?.code || '';
       if (code === 'not-found') {
         const payload = sanitizeChantierPayload(
-          { ...chantier, id, readerEmails },
+          { ...chantier, id, readerEmails, readerAccessCode },
           user.uid,
           ownerName,
           true
         );
         await setDoc(ref, payload);
-        return {
+        const savedFallback: Chantier = {
           ...chantier,
           id,
           ownerId: user.uid,
@@ -1182,7 +1308,17 @@ export async function saveChantierCloud(
           visibility: 'private',
           readerIds: payload.readerIds,
           readerEmails,
+          readerAccessCode,
         };
+        if (readerAccessCode) {
+          await syncDossierAccessGrant(
+            savedFallback,
+            user,
+            ownerName,
+            readerAccessCode
+          );
+        }
+        return savedFallback;
       }
       throw updateErr;
     }
@@ -1264,9 +1400,10 @@ function hasValidSignatureShape(
   if (sig == null) return true;
   if (typeof sig !== 'object') return false;
   const rec = sig as Record<string, unknown>;
+  const methodStr = String(rec.method || '');
   return (
     rec.role === expectedRole &&
-    (rec.method === 'itsme' || rec.method === 'eid') &&
+    (methodStr === 'itsme' || methodStr === 'eid') &&
     isValidFirestoreIdValue(rec.signerUid) &&
     typeof rec.signerName === 'string' &&
     rec.signerName.length >= 1 &&
@@ -2009,6 +2146,152 @@ export async function revokeChantierShare(share: ChantierShare): Promise<void> {
       error,
       OperationType.UPDATE,
       `chantierShares/${share.id}`
+    );
+  }
+}
+
+export async function redeemDossierPinCode(
+  chantierIdOrUrl: string,
+  rawPinCode: string,
+  user: User
+): Promise<{ chantierId: string; chantierProjet: string }> {
+  const chantierId = extractChantierIdFromInput(chantierIdOrUrl);
+  const pinCode = normalizeDossierPinCode(rawPinCode);
+
+  if (!chantierId) {
+    throw new Error(
+      'Ouvrez le lien complet reçu par e-mail (ou collez-le dans le champ Dossier) pour identifier le chantier.'
+    );
+  }
+  if (!pinCode) {
+    throw new Error('Le code d’accès du dossier doit contenir exactement 6 chiffres.');
+  }
+
+  const accessId = `${chantierId}_${pinCode}`;
+  const accessRef = doc(db, 'dossier_access', accessId);
+
+  let grantData: Record<string, unknown>;
+  try {
+    const snap = await getDocFromServer(accessRef);
+    if (!snap.exists()) {
+      throw new Error(
+        'Code d’accès à 6 chiffres incorrect pour ce dossier. Vérifiez le code reçu par e-mail.'
+      );
+    }
+    grantData = snap.data();
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('Code d’accès')) {
+      throw err;
+    }
+    if (isOfflineError(err)) {
+      throw new Error('Connexion Internet requise pour valider ce code de dossier.');
+    }
+    if (isQuotaExceededError(err)) {
+      throw new Error('Quota Firestore temporairement dépassé. Réessayez plus tard.');
+    }
+    throw new Error(
+      'Code d’accès incorrect ou accès refusé pour ce dossier. Vérifiez le lien et le code à 6 chiffres.'
+    );
+  }
+
+  const expiresAtMs = (grantData.expiresAt as { toMillis?: () => number })?.toMillis?.() ?? 0;
+  if (!grantData.active) {
+    throw new Error('Ce code d’accès a été désactivé par le contrôleur.');
+  }
+  if (expiresAtMs <= Date.now()) {
+    throw new Error('Ce code d’accès a expiré.');
+  }
+  if (grantData.ownerId === user.uid) {
+    return {
+      chantierId,
+      chantierProjet: String(
+        grantData.chantierProjet || grantData.chantierNumero || chantierId
+      ),
+    };
+  }
+
+  const shareId = `${chantierId}_${user.uid}`;
+  const shareRef = doc(db, 'chantierShares', shareId);
+  const readerName = clampStr(
+    user.displayName || user.email?.split('@')[0] || 'Entrepreneur',
+    120
+  );
+
+  try {
+    const existingShare = await getDocFromServer(shareRef).catch(() => null);
+    if (!existingShare || !existingShare.exists()) {
+      await setDoc(shareRef, {
+        id: shareId,
+        chantierId,
+        chantierOwnerId: String(grantData.ownerId),
+        inviteCode: pinCode,
+        readerUid: user.uid,
+        readerName,
+        label: clampStr(`Accès dossier (${user.email || readerName})`, 150),
+        revoked: false,
+        expiresAt: grantData.expiresAt,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await updateDoc(shareRef, {
+        inviteCode: pinCode,
+        expiresAt: grantData.expiresAt,
+        revoked: false,
+        label: clampStr(`Accès dossier (${user.email || readerName})`, 150),
+        readerName,
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    const chRef = doc(db, 'chantiers', chantierId);
+    await updateDoc(chRef, {
+      readerIds: arrayUnion(user.uid),
+      updatedAt: serverTimestamp(),
+    });
+
+    const chSnap = await getDocFromServer(chRef);
+    const knownJournalIds: string[] = Array.isArray(chSnap.data()?.journalIds)
+      ? chSnap.data()!.journalIds
+      : [];
+
+    if (knownJournalIds.length > 0) {
+      for (let i = 0; i < knownJournalIds.length; i += 350) {
+        const chunk = knownJournalIds.slice(i, i + 350);
+        const batch = writeBatch(db);
+        chunk.forEach((jId) => {
+          batch.update(doc(db, 'chantiers', chantierId, 'journaux', jId), {
+            chantierReaderIds: arrayUnion(user.uid),
+            updatedAt: serverTimestamp(),
+          });
+        });
+        try {
+          await batch.commit();
+        } catch {
+          await Promise.all(
+            chunk.map((jId) =>
+              updateDoc(doc(db, 'chantiers', chantierId, 'journaux', jId), {
+                chantierReaderIds: arrayUnion(user.uid),
+                updatedAt: serverTimestamp(),
+              }).catch(() => {})
+            )
+          );
+        }
+      }
+    }
+
+    setCachedReaderAccess(user.uid, true);
+    return {
+      chantierId,
+      chantierProjet: String(
+        grantData.chantierProjet || grantData.chantierNumero || chantierId
+      ),
+    };
+  } catch (error) {
+    handleFirestoreError(
+      error,
+      OperationType.WRITE,
+      `chantierShares/${shareId}`
     );
   }
 }

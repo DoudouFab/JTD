@@ -432,33 +432,22 @@ export function A4JournalSheet({
                   />
                 </div>
                 <div className="a4-sign-display">
-                  <div>{supervisorName}</div>
+                  <div className="a4-sign-name">
+                    {journal.signatureControleur?.signerName || supervisorName}
+                  </div>
                   {journal.signatureControleur && (
-                    <div className="a4-auth-badge">
-                      <div style={{ fontWeight: 700, color: '#0a5b9c' }}>
-                        ✓ Certifié via{' '}
-                        {journal.signatureControleur.method === 'itsme'
-                          ? 'itsme®'
-                          : 'e-ID'}
-                      </div>
-                      <div>
-                        Accord : {journal.signatureControleur.signerName}
-                        {journal.signatureControleur.signerEmail
-                          ? ` (${journal.signatureControleur.signerEmail})`
-                          : ''}
-                      </div>
+                    <div className="a4-sign-meta">
                       <div>
                         Le{' '}
                         {new Date(
                           journal.signatureControleur.signedAt
                         ).toLocaleString('fr-BE')}
                       </div>
-                      <div style={{ fontFamily: 'monospace' }}>
+                      <div className="a4-sign-mono">
                         Réf. {journal.signatureControleur.verificationId}
                       </div>
-                      <div style={{ fontFamily: 'monospace', fontSize: '5.5pt' }}>
-                        SHA-256 :{' '}
-                        {journal.signatureControleur.documentSha256.slice(0, 16)}…
+                      <div className="a4-sign-hash">
+                        SHA-256 : {journal.signatureControleur.documentSha256}
                       </div>
                     </div>
                   )}
@@ -467,37 +456,32 @@ export function A4JournalSheet({
             </td>
             <td colSpan={3}>
               <div className="a4-sign-display">
-                {journal.sigEntrepreneur || ''}
+                {journal.signatureLecteur ? (
+                  <>
+                    <div className="a4-sign-name">
+                      {journal.signatureLecteur.signerName}
+                    </div>
+                    <div className="a4-sign-meta">
+                      <div>
+                        Le{' '}
+                        {new Date(
+                          journal.signatureLecteur.signedAt
+                        ).toLocaleString('fr-BE')}
+                      </div>
+                      <div className="a4-sign-mono">
+                        Réf. {journal.signatureLecteur.verificationId}
+                      </div>
+                      <div className="a4-sign-hash">
+                        SHA-256 : {journal.signatureLecteur.documentSha256}
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="a4-sign-name">
+                    {journal.sigEntrepreneur || ''}
+                  </div>
+                )}
               </div>
-              {journal.signatureLecteur && (
-                <div className="a4-auth-badge reader">
-                  <div style={{ fontWeight: 700, color: '#15803d' }}>
-                    ✓ Certifié via{' '}
-                    {journal.signatureLecteur.method === 'itsme'
-                      ? 'itsme®'
-                      : 'e-ID'}
-                  </div>
-                  <div>
-                    Accord : {journal.signatureLecteur.signerName}
-                    {journal.signatureLecteur.signerEmail
-                      ? ` (${journal.signatureLecteur.signerEmail})`
-                      : ''}
-                  </div>
-                  <div>
-                    Le{' '}
-                    {new Date(
-                      journal.signatureLecteur.signedAt
-                    ).toLocaleString('fr-BE')}
-                  </div>
-                  <div style={{ fontFamily: 'monospace' }}>
-                    Réf. {journal.signatureLecteur.verificationId}
-                  </div>
-                  <div style={{ fontFamily: 'monospace', fontSize: '5.5pt' }}>
-                    SHA-256 :{' '}
-                    {journal.signatureLecteur.documentSha256.slice(0, 16)}…
-                  </div>
-                </div>
-              )}
             </td>
           </tr>
         </tbody>
