@@ -13,6 +13,7 @@ import {
   Plus,
   KeyRound,
   RefreshCw,
+  UserCheck,
 } from 'lucide-react';
 import { STANDARD_TRAVAUX_PRESETS, type Chantier } from '../types';
 import {
@@ -69,6 +70,8 @@ export function ChantierModal({
   const [preposeSurveillance, setPreposeSurveillance] = useState('');
   const [postes, setPostes] = useState<string[]>([]);
   const [readerEmails, setReaderEmails] = useState<string[]>([]);
+  const [delegateEmails, setDelegateEmails] = useState<string[]>([]);
+  const [delegateName, setDelegateName] = useState('');
   const [readerAccessCode, setReaderAccessCode] = useState<string>('');
   const [savingBusy, setSavingBusy] = useState(false);
 
@@ -114,10 +117,17 @@ export function ChantierModal({
     const initialEmails = editingChantier?.readerEmails?.length
       ? editingChantier.readerEmails.slice(0, 3)
       : [];
+    const initialDelegateEmails = editingChantier?.delegateEmails?.length
+      ? editingChantier.delegateEmails.slice(0, 3)
+      : [];
     setReaderEmails(initialEmails);
+    setDelegateEmails(initialDelegateEmails);
+    setDelegateName(editingChantier?.delegateName || '');
     setReaderAccessCode(
       normalizeDossierPinCode(editingChantier?.readerAccessCode) ||
-        (initialEmails.length > 0 ? generateDossierPinCode() : '')
+        (initialEmails.length > 0 || initialDelegateEmails.length > 0
+          ? generateDossierPinCode()
+          : '')
     );
     setSavingBusy(false);
     setErrorMsg(null);
@@ -232,10 +242,23 @@ export function ChantierModal({
       }
     }
 
+    for (const raw of delegateEmails) {
+      const trimmed = raw.trim().toLowerCase();
+      if (trimmed && !EMAIL_RE.test(trimmed)) {
+        setErrorMsg(
+          `Adresse e-mail de rédacteur remplaçant invalide : « ${raw.trim()} ». Corrigez-la ou supprimez la ligne.`
+        );
+        return null;
+      }
+    }
+
     const cleanedEmails = clampEmailList(readerEmails, 3);
+    const cleanedDelegateEmails = clampEmailList(delegateEmails, 3);
     const effectivePin =
       normalizeDossierPinCode(readerAccessCode) ||
-      (cleanedEmails.length > 0 ? generateDossierPinCode() : '');
+      (cleanedEmails.length > 0 || cleanedDelegateEmails.length > 0
+        ? generateDossierPinCode()
+        : '');
     if (effectivePin && effectivePin !== readerAccessCode) {
       setReaderAccessCode(effectivePin);
     }
@@ -248,6 +271,8 @@ export function ChantierModal({
       visibility: 'private',
       readerIds: editingChantier?.readerIds || [],
       readerEmails: cleanedEmails,
+      delegateEmails: cleanedDelegateEmails,
+      delegateName: delegateName.trim(),
       readerAccessCode: effectivePin,
       numero: numero.trim(),
       projet: projet.trim(),
@@ -259,6 +284,10 @@ export function ChantierModal({
       horaireFin: horaireFin || '16:30',
       preposeSurveillance: preposeSurveillance.trim(),
       postes,
+      jdtStatus: editingChantier?.jdtStatus || 'active',
+      standbySince: editingChantier?.standbySince || '',
+      closedAt: editingChantier?.closedAt || '',
+      standbyPeriods: editingChantier?.standbyPeriods || [],
     };
   };
 
@@ -354,7 +383,88 @@ export function ChantierModal({
     }
   };
 
+  const buildDelegateEmailContent = (pinOverride?: string) => {
+    const refText = references.trim() || numero.trim() || draftId;
+    const titre =
+      [numero.trim(), projet.trim()].filter(Boolean).join(' — ') ||
+      'Journal des travaux';
+    const shareLink = buildShareLink();
+    const effectivePin =
+      normalizeDossierPinCode(pinOverride || readerAccessCode) ||
+      generateDossierPinCode();
+    const nomRemplacant = delegateName.trim();
+    const subject = `Autorisation de rédaction JDT — ${titre} (Réf. ${refText})`;
+    const body = [
+      nomRemplacant ? `Bonjour ${nomRemplacant},` : 'Bonjour,',
+      '',
+      `Je vous transfère l'autorisation de suivi et de rédaction du journal des travaux pour ce chantier uniquement (${refText}${projet.trim() ? ` — ${projet.trim()}` : ''}) :`,
+      `Lien d'accès au chantier : ${shareLink}`,
+      `Code d'accès (6 chiffres) : ${effectivePin}`,
+      '',
+      'Portée de votre autorisation :',
+      '- Consultation complète de ce chantier uniquement.',
+      '- Rédaction de nouvelles pages et complétion des pages « En cours ».',
+      '- Les pages déjà validées/terminées restent verrouillées et ne peuvent pas être modifiées.',
+      '- Signature e-ID en votre propre nom (votre nom apparaît comme préposé à la surveillance pour vos jours rédigés).',
+      '',
+      'Comment vous connecter :',
+      `- Connectez-vous avec cette adresse e-mail via Google OU via l'onglet « E-mail pro » → « 1re connexion » en utilisant le code à 6 chiffres (${effectivePin}).`,
+      `- Si un code de dossier est demandé, saisissez : ${effectivePin}.`,
+      '',
+      preposeSurveillance.trim()
+        ? `Bien à vous,\n${preposeSurveillance.trim()}`
+        : 'Bien à vous,',
+    ].join('\n');
+    return { subject, body, shareLink, effectivePin };
+  };
+
+  const handleSaveAndSendDelegateMail = async () => {
+    const payload = validateAndBuildChantier();
+    if (!payload) return;
+    const emails = payload.delegateEmails || [];
+    if (!emails.length) {
+      setErrorMsg(
+        'Encodez au moins une adresse e-mail de rédacteur remplaçant.'
+      );
+      return;
+    }
+
+    setSavingBusy(true);
+    try {
+      const savedOk = await onSave(payload, { keepOpen: true });
+      if (savedOk === false) return;
+
+      const { subject, body } = buildDelegateEmailContent(
+        payload.readerAccessCode
+      );
+      const mailtoHref = `mailto:${encodeURIComponent(emails.join(','))}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+      window.location.href = mailtoHref;
+      onNotify(
+        `Autorisation enregistrée et e-mail préparé pour ${emails.join(', ')}.`,
+        'success'
+      );
+    } finally {
+      setSavingBusy(false);
+    }
+  };
+
+  const handleCopyDelegateEmailText = async () => {
+    const payload = validateAndBuildChantier();
+    if (!payload) return;
+    const { subject, body } = buildDelegateEmailContent(payload.readerAccessCode);
+    try {
+      await navigator.clipboard.writeText(`Objet : ${subject}\n\n${body}`);
+      onNotify(
+        'Message de transfert et lien copiés dans le presse-papiers.',
+        'success'
+      );
+    } catch {
+      onNotify('Copie automatique impossible sur ce navigateur.', 'error');
+    }
+  };
+
   const validEmailsCount = clampEmailList(readerEmails, 3).length;
+  const validDelegateEmailsCount = clampEmailList(delegateEmails, 3).length;
   const displayedPin = normalizeDossierPinCode(readerAccessCode);
 
   return (
@@ -801,6 +911,130 @@ export function ChantierModal({
                   >
                     <Copy className="w-3.5 h-3.5" />
                     Copier message &amp; lien
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Transfert d'autorisation de rédaction (remplaçant) */}
+          <div className="rounded-xl border border-indigo-200 bg-indigo-50/45 p-4 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-start gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-indigo-600/10 text-indigo-700 flex items-center justify-center shrink-0 mt-0.5">
+                  <UserCheck className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-wide text-slate-800">
+                    Transfert d&apos;autorisation de rédaction (remplaçant)
+                  </div>
+                  <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
+                    Autorise un remplaçant à suivre et rédiger de nouveaux jours
+                    sur <strong>ce chantier uniquement</strong>, à signer en son
+                    nom et à remplacer le nom du préposé sur ses jours rédigés.
+                    Les JDT déjà validés restent verrouillés.
+                  </p>
+                </div>
+              </div>
+              {delegateEmails.length < 3 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!normalizeDossierPinCode(readerAccessCode)) {
+                      setReaderAccessCode(generateDossierPinCode());
+                    }
+                    setDelegateEmails((prev) => [...prev, '']);
+                  }}
+                  className="min-h-[38px] px-3 rounded-xl border border-indigo-300 bg-white hover:bg-indigo-50 text-indigo-700 text-xs font-semibold flex items-center gap-1.5 cursor-pointer shrink-0 self-start sm:self-center"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Ajouter ({delegateEmails.length}/3)
+                </button>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Nom du responsable / préposé remplaçant (pré-rempli sur ses jours)
+              </label>
+              <input
+                type="text"
+                value={delegateName}
+                onChange={(e) => setDelegateName(e.target.value)}
+                placeholder="ex. J. Dupont (affiché comme préposé à la surveillance)"
+                className="w-full min-h-[42px] px-3.5 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+
+            {delegateEmails.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-indigo-200 bg-white px-3.5 py-2.5 text-xs text-slate-500">
+                Aucun rédacteur remplaçant configuré. Cliquez sur{' '}
+                <strong>« Ajouter »</strong> pour transférer l&apos;autorisation
+                de rédaction par e-mail.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {delegateEmails.map((em, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <input
+                      type="email"
+                      value={em}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setDelegateEmails((prev) =>
+                          prev.map((item, i) => (i === idx ? val : item))
+                        );
+                      }}
+                      placeholder={`E-mail du remplaçant ${idx + 1} (ex. collegue@inasep.be)`}
+                      className="flex-1 min-h-[42px] px-3.5 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 focus:outline-none focus:border-indigo-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setDelegateEmails((prev) =>
+                          prev.filter((_, i) => i !== idx)
+                        )
+                      }
+                      className="min-h-[42px] min-w-[42px] flex items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-400 hover:text-red-600 hover:border-red-200 cursor-pointer shrink-0"
+                      title="Retirer ce remplaçant"
+                      aria-label="Retirer ce remplaçant"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {validDelegateEmailsCount > 0 && (
+              <div className="pt-1 space-y-2.5">
+                <div className="rounded-xl border border-indigo-200/80 bg-white p-3 text-[11px] text-slate-600 leading-relaxed whitespace-pre-line">
+                  <div className="font-bold text-slate-800 mb-1">
+                    Aperçu du message de transfert :
+                  </div>
+                  {buildDelegateEmailContent().body}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={savingBusy}
+                    onClick={() => void handleSaveAndSendDelegateMail()}
+                    className="min-h-[42px] px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs sm:text-sm font-semibold flex items-center gap-2 cursor-pointer disabled:opacity-60"
+                  >
+                    <Send className="w-4 h-4" />
+                    {savingBusy
+                      ? 'Enregistrement…'
+                      : `Enregistrer et envoyer au remplaçant (${validDelegateEmailsCount})`}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyDelegateEmailText()}
+                    className="min-h-[42px] px-3.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    Copier transfert &amp; lien
                   </button>
                 </div>
               </div>

@@ -105,6 +105,7 @@ export function A4JournalSheet({
 
   const supervisorName =
     journal.signatureControleur?.signerName ||
+    journal.preposeSurveillance ||
     chantier.preposeSurveillance ||
     '';
 
@@ -437,6 +438,14 @@ export function A4JournalSheet({
                   </div>
                   {journal.signatureControleur && (
                     <div className="a4-sign-meta">
+                      {journal.signatureControleur.hardwareVerified && (
+                        <div>
+                          Certifié puce eID
+                          {journal.signatureControleur.certSerial
+                            ? ` · Cert. ${journal.signatureControleur.certSerial.slice(0, 16)}`
+                            : ''}
+                        </div>
+                      )}
                       <div>
                         Le{' '}
                         {new Date(
@@ -462,6 +471,14 @@ export function A4JournalSheet({
                       {journal.signatureLecteur.signerName}
                     </div>
                     <div className="a4-sign-meta">
+                      {journal.signatureLecteur.hardwareVerified && (
+                        <div>
+                          Certifié puce eID
+                          {journal.signatureLecteur.certSerial
+                            ? ` · Cert. ${journal.signatureLecteur.certSerial.slice(0, 16)}`
+                            : ''}
+                        </div>
+                      )}
                       <div>
                         Le{' '}
                         {new Date(

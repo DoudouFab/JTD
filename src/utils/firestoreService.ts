@@ -30,6 +30,7 @@ import type {
   AccessStatus,
   AccessUserRecord,
   Chantier,
+  ChantierJdtStatus,
   ChantierShare,
   DB,
   Journal,
@@ -37,6 +38,7 @@ import type {
   PageSignatureRecord,
   PreauthorizedEmail,
   ShareInvite,
+  StandbyPeriod,
   UserProfile,
 } from '../types';
 import { uid } from './storage';
@@ -391,6 +393,14 @@ export async function checkDossierReaderStartup(
             )
               .then((snap) => !snap.empty)
               .catch(() => false),
+            getDocsFromServer(
+              query(
+                collection(db, 'chantiers'),
+                where('delegateEmails', 'array-contains', emailLower)
+              )
+            )
+              .then((snap) => !snap.empty)
+              .catch(() => false),
           ]
         : []),
       getDocsFromServer(
@@ -426,11 +436,14 @@ export async function checkDossierReaderStartup(
             if (!snap.exists()) return false;
             const data = snap.data();
             const emails = clampEmailList(data.readerEmails, 3);
+            const delegateEmails = clampEmailList(data.delegateEmails, 3);
             const readerIds = Array.isArray(data.readerIds)
               ? data.readerIds.map(String)
               : [];
             return (
-              (Boolean(emailLower) && emails.includes(emailLower)) ||
+              (Boolean(emailLower) &&
+                (emails.includes(emailLower) ||
+                  delegateEmails.includes(emailLower))) ||
               readerIds.includes(user.uid)
             );
           })
@@ -846,6 +859,26 @@ export async function updateUserPreferences(
 // Chantiers & Journaux (One-Shot Fetches + Local Offline Cache, NO onSnapshot)
 // ---------------------------------------------------------------------------
 
+function normalizeChantierJdtStatus(val: unknown): ChantierJdtStatus {
+  if (val === 'standby' || val === 'archived') return val;
+  return 'active';
+}
+
+function sanitizeStandbyPeriods(val: unknown): StandbyPeriod[] {
+  if (!Array.isArray(val)) return [];
+  return val
+    .slice(0, 50)
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+    .map((item) => ({
+      id: sanitizeDocId(String(item.id || uid())),
+      startDate: clampStr(item.startDate, 20),
+      endDate: clampStr(item.endDate, 20),
+      resumeDate: clampStr(item.resumeDate, 20),
+      note: clampStr(item.note || '', 200),
+    }))
+    .filter((p) => Boolean(p.startDate && p.endDate));
+}
+
 function sanitizeChantierPayload(
   ch: Chantier,
   ownerId: string,
@@ -857,9 +890,18 @@ function sanitizeChantierPayload(
     /^[a-zA-Z0-9_-]+$/.test(id)
   );
   const readerEmails = clampEmailList(ch.readerEmails || [], 3);
+  const delegateEmails = clampEmailList(ch.delegateEmails || [], 3);
+  const delegateName = clampStr(ch.delegateName || '', 150);
   const normalizedPin = normalizeDossierPinCode(ch.readerAccessCode);
   const readerAccessCode =
-    normalizedPin || (readerEmails.length > 0 ? generateDossierPinCode() : '');
+    normalizedPin ||
+    (readerEmails.length > 0 || delegateEmails.length > 0
+      ? generateDossierPinCode()
+      : '');
+  const jdtStatus = normalizeChantierJdtStatus(ch.jdtStatus);
+  const standbySince = clampStr(ch.standbySince || '', 20);
+  const closedAt = clampStr(ch.closedAt || '', 20);
+  const standbyPeriods = sanitizeStandbyPeriods(ch.standbyPeriods);
 
   return {
     id: sanitizeDocId(ch.id),
@@ -868,6 +910,8 @@ function sanitizeChantierPayload(
     visibility: 'private' as const,
     readerIds,
     readerEmails,
+    delegateEmails,
+    delegateName,
     readerAccessCode,
     journalIds: clampStrList(
       (ch as Chantier & { journalIds?: string[] }).journalIds || [],
@@ -884,6 +928,10 @@ function sanitizeChantierPayload(
     horaireFin: clampStr(ch.horaireFin || '16:30', 20),
     preposeSurveillance: clampStr(ch.preposeSurveillance, 150),
     postes: clampStrList(ch.postes, 2000, 350),
+    jdtStatus,
+    standbySince,
+    closedAt,
+    standbyPeriods,
     createdAt: isCreate
       ? serverTimestamp()
       : existingCreatedAt || serverTimestamp(),
@@ -913,6 +961,10 @@ function sanitizeJournalPayload(
     128
   ).filter((id) => /^[a-zA-Z0-9_-]+$/.test(id));
   const chantierReaderEmails = clampEmailList(chantier.readerEmails || [], 3);
+  const chantierDelegateEmails = clampEmailList(
+    chantier.delegateEmails || [],
+    3
+  );
 
   const status: JournalStatus =
     j.status === 'completed' ? 'completed' : 'in_progress';
@@ -923,6 +975,8 @@ function sanitizeJournalPayload(
     chantierOwnerId: chantier.ownerId || authorId,
     chantierReaderIds,
     chantierReaderEmails,
+    chantierDelegateEmails,
+    preposeSurveillance: clampStr(j.preposeSurveillance || '', 150),
     authorId,
     authorName: clampStr(authorName, 120),
     status,
@@ -962,7 +1016,7 @@ export async function fetchChantiersAndSharesOnce(
   const emailLower = (userEmail || '').trim().toLowerCase();
 
   try {
-    const [ownedSnap, sharesSnap, emailSnap] = await Promise.all([
+    const [ownedSnap, sharesSnap, emailSnap, delegateSnap] = await Promise.all([
       getDocsFromServer(
         query(collection(db, 'chantiers'), where('ownerId', '==', userId))
       ),
@@ -980,12 +1034,23 @@ export async function fetchChantiersAndSharesOnce(
             )
           ).catch(() => null)
         : Promise.resolve(null),
+      emailLower
+        ? getDocsFromServer(
+            query(
+              collection(db, 'chantiers'),
+              where('delegateEmails', 'array-contains', emailLower)
+            )
+          ).catch(() => null)
+        : Promise.resolve(null),
     ]);
 
     const merged = new Map<string, Chantier>();
     ownedSnap.docs.forEach((d) => merged.set(d.id, d.data() as Chantier));
     if (emailSnap) {
       emailSnap.docs.forEach((d) => merged.set(d.id, d.data() as Chantier));
+    }
+    if (delegateSnap) {
+      delegateSnap.docs.forEach((d) => merged.set(d.id, d.data() as Chantier));
     }
 
     const now = Date.now();
@@ -1059,6 +1124,9 @@ export async function fetchChantierJournauxOnce(
   const isEmailReader =
     Boolean(emailLower) &&
     clampEmailList(chantier.readerEmails || [], 3).includes(emailLower);
+  const isDelegate =
+    Boolean(emailLower) &&
+    clampEmailList(chantier.delegateEmails || [], 3).includes(emailLower);
 
   try {
     const docMap = new Map<string, Record<string, unknown>>();
@@ -1070,6 +1138,18 @@ export async function fetchChantierJournauxOnce(
       snap.docs.forEach((d) => docMap.set(d.id, d.data()));
     } else {
       const queries: Array<Promise<void>> = [];
+      if (isDelegate) {
+        queries.push(
+          getDocsFromServer(
+            query(
+              col,
+              where('chantierDelegateEmails', 'array-contains', emailLower)
+            )
+          ).then((snap) => {
+            snap.docs.forEach((d) => docMap.set(d.id, d.data()));
+          })
+        );
+      }
       if (isEmailReader) {
         queries.push(
           getDocsFromServer(
@@ -1079,7 +1159,10 @@ export async function fetchChantierJournauxOnce(
           })
         );
       }
-      if (!isEmailReader || (chantier.readerIds || []).includes(userId)) {
+      if (
+        (!isEmailReader && !isDelegate) ||
+        (chantier.readerIds || []).includes(userId)
+      ) {
         queries.push(
           getDocsFromServer(
             query(col, where('chantierReaderIds', 'array-contains', userId))
@@ -1088,7 +1171,7 @@ export async function fetchChantierJournauxOnce(
               snap.docs.forEach((d) => docMap.set(d.id, d.data()));
             })
             .catch((err) => {
-              if (!isEmailReader) throw err;
+              if (!isEmailReader && !isDelegate) throw err;
             })
         );
       }
@@ -1201,14 +1284,35 @@ export async function saveChantierCloud(
     user.email?.split('@')[0] ||
     'Utilisateur';
   const readerEmails = clampEmailList(chantier.readerEmails || [], 3);
+  const delegateEmails = clampEmailList(chantier.delegateEmails || [], 3);
+  const delegateName = clampStr(chantier.delegateName || '', 150);
   const normalizedPin = normalizeDossierPinCode(chantier.readerAccessCode);
   const readerAccessCode =
-    normalizedPin || (readerEmails.length > 0 ? generateDossierPinCode() : '');
+    normalizedPin ||
+    (readerEmails.length > 0 || delegateEmails.length > 0
+      ? generateDossierPinCode()
+      : '');
 
   try {
+    const jdtStatus = normalizeChantierJdtStatus(chantier.jdtStatus);
+    const standbySince = clampStr(chantier.standbySince || '', 20);
+    const closedAt = clampStr(chantier.closedAt || '', 20);
+    const standbyPeriods = sanitizeStandbyPeriods(chantier.standbyPeriods);
+
     if (!chantier.ownerId) {
       const payload = sanitizeChantierPayload(
-        { ...chantier, id, readerEmails, readerAccessCode },
+        {
+          ...chantier,
+          id,
+          readerEmails,
+          delegateEmails,
+          delegateName,
+          readerAccessCode,
+          jdtStatus,
+          standbySince,
+          closedAt,
+          standbyPeriods,
+        },
         user.uid,
         ownerName,
         true
@@ -1222,7 +1326,13 @@ export async function saveChantierCloud(
         visibility: 'private',
         readerIds: payload.readerIds,
         readerEmails,
+        delegateEmails,
+        delegateName,
         readerAccessCode,
+        jdtStatus,
+        standbySince,
+        closedAt,
+        standbyPeriods,
       };
       if (readerAccessCode) {
         await syncDossierAccessGrant(savedNew, user, ownerName, readerAccessCode);
@@ -1232,6 +1342,8 @@ export async function saveChantierCloud(
 
     const updateFields: Record<string, unknown> = {
       readerEmails,
+      delegateEmails,
+      delegateName,
       readerAccessCode,
       numero: clampStr(chantier.numero, 100),
       projet: clampStr(chantier.projet, 250),
@@ -1243,13 +1355,17 @@ export async function saveChantierCloud(
       horaireFin: clampStr(chantier.horaireFin || '16:30', 20),
       preposeSurveillance: clampStr(chantier.preposeSurveillance, 150),
       postes: clampStrList(chantier.postes, 2000, 350),
+      jdtStatus,
+      standbySince,
+      closedAt,
+      standbyPeriods,
       updatedAt: serverTimestamp(),
     };
 
     try {
       await updateDoc(ref, updateFields);
 
-      // Sync chantierReaderEmails across all existing journals of this chantier
+      // Sync chantierReaderEmails & chantierDelegateEmails across all existing journals
       try {
         const jSnap = await getDocs(
           query(
@@ -1259,23 +1375,31 @@ export async function saveChantierCloud(
         );
         const docsToSync = jSnap.docs.filter((d) => {
           const existingEmails = clampEmailList(d.data().chantierReaderEmails, 3);
-          return (
-            existingEmails.length !== readerEmails.length ||
-            existingEmails.some((e, idx) => e !== readerEmails[idx])
+          const existingDelegates = clampEmailList(
+            d.data().chantierDelegateEmails,
+            3
           );
+          const readerDiff =
+            existingEmails.length !== readerEmails.length ||
+            existingEmails.some((e, idx) => e !== readerEmails[idx]);
+          const delegateDiff =
+            existingDelegates.length !== delegateEmails.length ||
+            existingDelegates.some((e, idx) => e !== delegateEmails[idx]);
+          return readerDiff || delegateDiff;
         });
         for (let i = 0; i < docsToSync.length; i += 350) {
           const batch = writeBatch(db);
           docsToSync.slice(i, i + 350).forEach((d) => {
             batch.update(d.ref, {
               chantierReaderEmails: readerEmails,
+              chantierDelegateEmails: delegateEmails,
               updatedAt: serverTimestamp(),
             });
           });
           await batch.commit();
         }
       } catch {
-        // Non-fatal if offline; new journals will read chantier.readerEmails
+        // Non-fatal if offline; new journals will read chantier.readerEmails / delegateEmails
       }
 
       const savedExisting: Chantier = {
@@ -1286,7 +1410,13 @@ export async function saveChantierCloud(
         visibility: 'private',
         readerIds: chantier.readerIds || [],
         readerEmails,
+        delegateEmails,
+        delegateName,
         readerAccessCode,
+        jdtStatus,
+        standbySince,
+        closedAt,
+        standbyPeriods,
       };
       await syncDossierAccessGrant(savedExisting, user, ownerName, readerAccessCode);
       return savedExisting;
@@ -1294,7 +1424,18 @@ export async function saveChantierCloud(
       const code = (updateErr as { code?: string })?.code || '';
       if (code === 'not-found') {
         const payload = sanitizeChantierPayload(
-          { ...chantier, id, readerEmails, readerAccessCode },
+          {
+            ...chantier,
+            id,
+            readerEmails,
+            delegateEmails,
+            delegateName,
+            readerAccessCode,
+            jdtStatus,
+            standbySince,
+            closedAt,
+            standbyPeriods,
+          },
           user.uid,
           ownerName,
           true
@@ -1308,7 +1449,13 @@ export async function saveChantierCloud(
           visibility: 'private',
           readerIds: payload.readerIds,
           readerEmails,
+          delegateEmails,
+          delegateName,
           readerAccessCode,
+          jdtStatus,
+          standbySince,
+          closedAt,
+          standbyPeriods,
         };
         if (readerAccessCode) {
           await syncDossierAccessGrant(
@@ -1348,6 +1495,8 @@ const ALLOWED_JOURNAL_KEYS = new Set([
   'chantierOwnerId',
   'chantierReaderIds',
   'chantierReaderEmails',
+  'chantierDelegateEmails',
+  'preposeSurveillance',
   'authorId',
   'authorName',
   'status',
@@ -1436,6 +1585,13 @@ function serverJournalNeedsSchemaCleanup(
   if (typeof raw.tempMatin !== 'string' || raw.tempMatin.length > 20) return true;
   if (typeof raw.tempApresMidi !== 'string' || raw.tempApresMidi.length > 20) return true;
   if (typeof raw.sigEntrepreneur !== 'string' || raw.sigEntrepreneur.length > 150) return true;
+  if (
+    raw.preposeSurveillance !== undefined &&
+    (typeof raw.preposeSurveillance !== 'string' ||
+      raw.preposeSurveillance.length > 150)
+  ) {
+    return true;
+  }
   if (!isBoundedStringArray(raw.etatAtmo, 20)) return true;
   if (
     !Array.isArray(raw.ouvriers) ||
@@ -1460,6 +1616,12 @@ function serverJournalNeedsSchemaCleanup(
   if (
     raw.chantierReaderEmails !== undefined &&
     !isBoundedStringArray(raw.chantierReaderEmails, 3)
+  ) {
+    return true;
+  }
+  if (
+    raw.chantierDelegateEmails !== undefined &&
+    !isBoundedStringArray(raw.chantierDelegateEmails, 3)
   ) {
     return true;
   }
@@ -1491,6 +1653,9 @@ async function resolveLiveChantierReaders(
         readerEmails: Array.isArray(chData.readerEmails)
           ? clampEmailList(chData.readerEmails, 3)
           : liveChantier.readerEmails,
+        delegateEmails: Array.isArray(chData.delegateEmails)
+          ? clampEmailList(chData.delegateEmails, 3)
+          : liveChantier.delegateEmails,
       };
     }
   } catch {
@@ -1531,6 +1696,8 @@ export async function saveJournalCloud(
     }
 
     const serverData = snap.data();
+    const isOwner =
+      chantier.ownerId === user.uid || serverData?.chantierOwnerId === user.uid;
     const hasCtrlSig =
       serverData?.signatureControleur != null &&
       typeof serverData.signatureControleur === 'object';
@@ -1544,7 +1711,13 @@ export async function saveJournalCloud(
       );
     }
 
-    if (serverJournalNeedsSchemaCleanup(serverData, cId, jId)) {
+    if (!isOwner && serverData?.status === 'completed') {
+      throw new Error(
+        'Ce journal a déjà été validé et ne peut plus être modifié par un rédacteur remplaçant.'
+      );
+    }
+
+    if (isOwner && serverJournalNeedsSchemaCleanup(serverData, cId, jId)) {
       const liveChantier = await resolveLiveChantierReaders(chantier, cId);
       const validCreatedAt = isFirestoreTimestamp(serverData.createdAt)
         ? serverData.createdAt
@@ -1578,7 +1751,7 @@ export async function saveJournalCloud(
     const status: JournalStatus =
       journal.status === 'completed' ? 'completed' : 'in_progress';
 
-    await updateDoc(ref, {
+    const updatePayload: Record<string, unknown> = {
       status,
       journalNum: Math.max(1, Math.min(99999, Number(journal.journalNum) || 1)),
       date: clampStr(journal.date, 20),
@@ -1602,12 +1775,21 @@ export async function saveJournalCloud(
       decisions: clampStrList(journal.decisions, 200, 500),
       visites: clampStrList(journal.visites, 200, 400),
       sigEntrepreneur: clampStr(journal.sigEntrepreneur, 150),
+      preposeSurveillance: clampStr(journal.preposeSurveillance || '', 150),
       updatedAt: serverTimestamp(),
-    });
+    };
+
+    if (!isOwner && serverData?.authorId !== user.uid) {
+      updatePayload.authorId = user.uid;
+      updatePayload.authorName = clampStr(authorName, 120);
+    }
+
+    await updateDoc(ref, updatePayload);
   } catch (error) {
     if (
       error instanceof Error &&
-      error.message.includes('déjà été signée par un membre')
+      (error.message.includes('déjà été signée par un membre') ||
+        error.message.includes('ne peut plus être modifié par un rédacteur remplaçant'))
     ) {
       throw error;
     }
@@ -1619,15 +1801,58 @@ export async function saveJournalCloud(
   }
 }
 
+function sanitizeSignatureRecord(sig: PageSignatureRecord): PageSignatureRecord {
+  const clean: PageSignatureRecord = {
+    role: sig.role,
+    method: 'eid',
+    signerUid: sanitizeDocId(sig.signerUid),
+    signerName: clampStr(sig.signerName, 120) || 'Signataire',
+    signerEmail: clampStr(sig.signerEmail, 200),
+    nationalIdHash: clampStr(sig.nationalIdHash, 128),
+    verificationId: clampStr(sig.verificationId, 80),
+    verifiedAt: clampStr(sig.verifiedAt, 40),
+    signedAt: clampStr(sig.signedAt, 40),
+    documentSha256: clampStr(sig.documentSha256, 128),
+    cryptoDigest: clampStr(sig.cryptoDigest, 512),
+    webAuthnUsed: Boolean(sig.webAuthnUsed),
+  };
+  if (typeof sig.hardwareVerified === 'boolean') {
+    clean.hardwareVerified = sig.hardwareVerified;
+  }
+  if (typeof sig.certIssuer === 'string' && sig.certIssuer) {
+    clean.certIssuer = clampStr(sig.certIssuer, 160);
+  }
+  if (typeof sig.certSerial === 'string' && sig.certSerial) {
+    clean.certSerial = clampStr(sig.certSerial, 80);
+  }
+  if (typeof sig.certThumbprint === 'string' && sig.certThumbprint) {
+    clean.certThumbprint = clampStr(sig.certThumbprint, 128);
+  }
+  if (typeof sig.certValidTo === 'string' && sig.certValidTo) {
+    clean.certValidTo = clampStr(sig.certValidTo, 40);
+  }
+  if (typeof sig.ocspStatus === 'string' && sig.ocspStatus) {
+    clean.ocspStatus = clampStr(sig.ocspStatus, 32);
+  }
+  if (typeof sig.signatureAlgorithm === 'string' && sig.signatureAlgorithm) {
+    clean.signatureAlgorithm = clampStr(sig.signatureAlgorithm, 40);
+  }
+  if (typeof sig.eidSignatureB64 === 'string' && sig.eidSignatureB64) {
+    clean.eidSignatureB64 = clampStr(sig.eidSignatureB64, 1024);
+  }
+  return clean;
+}
+
 export async function signJournalPageCloud(
   chantierId: string,
   journalId: string,
   role: 'controleur' | 'lecteur',
-  signature: PageSignatureRecord,
+  rawSignature: PageSignatureRecord,
   chantier?: Chantier,
   journal?: Journal,
   user?: User | null
 ): Promise<void> {
+  const signature = sanitizeSignatureRecord(rawSignature);
   const cId = sanitizeDocId(chantierId);
   const jId = sanitizeDocId(journalId);
   const ref = doc(db, 'chantiers', cId, 'journaux', jId);
@@ -1662,7 +1887,6 @@ export async function signJournalPageCloud(
         }).catch(() => {});
         await updateDoc(ref, {
           signatureControleur: signature,
-          status: 'completed',
           updatedAt: serverTimestamp(),
         });
         return;
@@ -1673,9 +1897,12 @@ export async function signJournalPageCloud(
     }
 
     const serverData = serverSnap.data();
+    const isOwner =
+      (serverData.chantierOwnerId || chantier?.ownerId) === user?.uid;
     diagInfo = {
       ...diagInfo,
       serverExists: true,
+      isOwner,
       serverKeys: Object.keys(serverData).sort(),
       hasCreatedAtTs: isFirestoreTimestamp(serverData.createdAt),
       hasValidAuthorId: isValidFirestoreIdValue(serverData.authorId),
@@ -1695,6 +1922,33 @@ export async function signJournalPageCloud(
         throw new Error(
           'Cette page est déjà signée par le contrôleur. Cliquez sur Actualiser.'
         );
+      }
+
+      if (!isOwner) {
+        if (serverData.status !== 'completed') {
+          throw new Error(
+            'Cette page doit être marquée comme terminée avant de pouvoir être signée.'
+          );
+        }
+        if (serverData.authorId !== user?.uid) {
+          throw new Error(
+            'En tant que rédacteur remplaçant, vous pouvez uniquement signer les pages que vous avez rédigées.'
+          );
+        }
+        diagInfo = { ...diagInfo, writeMode: 'updateDoc_delegate' };
+        await updateDoc(ref, {
+          signatureControleur: signature,
+          preposeSurveillance: clampStr(
+            journal?.preposeSurveillance ||
+              (typeof serverData.preposeSurveillance === 'string'
+                ? serverData.preposeSurveillance
+                : '') ||
+              signature.signerName,
+            150
+          ),
+          updatedAt: serverTimestamp(),
+        });
+        return;
       }
 
       const hasValidReaderSig =
@@ -1824,7 +2078,9 @@ export async function signJournalPageCloud(
       !error.message.includes('Missing or insufficient') &&
       (error.message.includes('déjà signée') ||
         error.message.includes('pas encore') ||
-        error.message.includes('synchronisé'))
+        error.message.includes('synchronisé') ||
+        error.message.includes('rédacteur remplaçant') ||
+        error.message.includes('marquée comme terminée'))
     ) {
       throw error;
     }

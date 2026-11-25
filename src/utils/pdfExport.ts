@@ -120,7 +120,11 @@ export async function generateAndDeliverPdf(
             ? {
                 role: 'controleur' as const,
                 method: j.signatureControleur.method,
-                methodLabel: formatSignatureMethodLabel(j.signatureControleur.method),
+                methodLabel: formatSignatureMethodLabel(
+                  j.signatureControleur.method,
+                  j.signatureControleur.hardwareVerified
+                ),
+                hardwareVerified: Boolean(j.signatureControleur.hardwareVerified),
                 signerUid: j.signatureControleur.signerUid,
                 signerName: j.signatureControleur.signerName,
                 signerEmail: j.signatureControleur.signerEmail,
@@ -131,6 +135,13 @@ export async function generateAndDeliverPdf(
                 cryptoDigest: j.signatureControleur.cryptoDigest,
                 webAuthnUsed: j.signatureControleur.webAuthnUsed,
                 nationalIdHash: j.signatureControleur.nationalIdHash,
+                certIssuer: j.signatureControleur.certIssuer || '',
+                certSerial: j.signatureControleur.certSerial || '',
+                certThumbprint: j.signatureControleur.certThumbprint || '',
+                certValidTo: j.signatureControleur.certValidTo || '',
+                ocspStatus: j.signatureControleur.ocspStatus || '',
+                signatureAlgorithm: j.signatureControleur.signatureAlgorithm || '',
+                eidSignatureB64: j.signatureControleur.eidSignatureB64 || '',
                 integrityVerifiedAtExport: ctrlVerify?.valid ?? false,
               }
             : null,
@@ -138,7 +149,11 @@ export async function generateAndDeliverPdf(
             ? {
                 role: 'lecteur' as const,
                 method: j.signatureLecteur.method,
-                methodLabel: formatSignatureMethodLabel(j.signatureLecteur.method),
+                methodLabel: formatSignatureMethodLabel(
+                  j.signatureLecteur.method,
+                  j.signatureLecteur.hardwareVerified
+                ),
+                hardwareVerified: Boolean(j.signatureLecteur.hardwareVerified),
                 signerUid: j.signatureLecteur.signerUid,
                 signerName: j.signatureLecteur.signerName,
                 signerEmail: j.signatureLecteur.signerEmail,
@@ -149,6 +164,13 @@ export async function generateAndDeliverPdf(
                 cryptoDigest: j.signatureLecteur.cryptoDigest,
                 webAuthnUsed: j.signatureLecteur.webAuthnUsed,
                 nationalIdHash: j.signatureLecteur.nationalIdHash,
+                certIssuer: j.signatureLecteur.certIssuer || '',
+                certSerial: j.signatureLecteur.certSerial || '',
+                certThumbprint: j.signatureLecteur.certThumbprint || '',
+                certValidTo: j.signatureLecteur.certValidTo || '',
+                ocspStatus: j.signatureLecteur.ocspStatus || '',
+                signatureAlgorithm: j.signatureLecteur.signatureAlgorithm || '',
+                eidSignatureB64: j.signatureLecteur.eidSignatureB64 || '',
                 integrityVerifiedAtExport: lectVerify?.valid ?? false,
               }
             : null,
@@ -205,7 +227,7 @@ export async function generateAndDeliverPdf(
     const primaryLect = authRecords.find((r) => r.lecteur)?.lecteur || null;
 
     const authManifestJson = JSON.stringify({
-      schema: 'INASEP-JDT-AUTH-V2',
+      schema: 'INASEP-JDT-AUTH-V3',
       chantierId: chantier.id,
       chantierNumero: chantier.numero,
       chantierProjet: chantier.projet,
@@ -235,7 +257,7 @@ export async function generateAndDeliverPdf(
         ...uniqueVerifIds,
         ...shaList,
       ].join(', '),
-      creator: 'Mes JDT (INASEP) — Signatures e-ID (SHA-256 + ECDSA P-256)',
+      creator: 'Mes JDT (INASEP) — Signatures eID belge / SHA-256 + ECDSA P-256',
     });
 
     const xmpBody = [
@@ -243,15 +265,23 @@ export async function generateAndDeliverPdf(
       `<ChantierNumero>${xmlEscape(chantier.numero || '')}</ChantierNumero>`,
       `<SignatureControleurPresent>${primaryCtrl ? 'true' : 'false'}</SignatureControleurPresent>`,
       `<SignatureControleurMethode>${xmlEscape(primaryCtrl?.methodLabel || 'Aucune')}</SignatureControleurMethode>`,
+      `<SignatureControleurPuceEID>${primaryCtrl?.hardwareVerified ? 'true' : 'false'}</SignatureControleurPuceEID>`,
       `<SignatureControleurIdentite>${xmlEscape(primaryCtrl ? `${primaryCtrl.signerName} (${primaryCtrl.signerEmail || primaryCtrl.signerUid})` : '')}</SignatureControleurIdentite>`,
       `<SignatureControleurReference>${xmlEscape(primaryCtrl?.verificationId || '')}</SignatureControleurReference>`,
+      `<SignatureControleurCertificat>${xmlEscape(primaryCtrl?.certSerial || '')}</SignatureControleurCertificat>`,
+      `<SignatureControleurAutorite>${xmlEscape(primaryCtrl?.certIssuer || '')}</SignatureControleurAutorite>`,
+      `<SignatureControleurOCSP>${xmlEscape(primaryCtrl?.ocspStatus || '')}</SignatureControleurOCSP>`,
       `<SignatureControleurHorodatage>${xmlEscape(primaryCtrl?.signedAt || '')}</SignatureControleurHorodatage>`,
       `<SignatureControleurEmpreinteDonneesSHA256>${xmlEscape(primaryCtrl?.documentSha256 || '')}</SignatureControleurEmpreinteDonneesSHA256>`,
       `<SignatureControleurPreuveECDSA>${xmlEscape(primaryCtrl?.cryptoDigest || '')}</SignatureControleurPreuveECDSA>`,
       `<SignatureLecteurPresent>${primaryLect ? 'true' : 'false'}</SignatureLecteurPresent>`,
       `<SignatureLecteurMethode>${xmlEscape(primaryLect?.methodLabel || 'Aucune')}</SignatureLecteurMethode>`,
+      `<SignatureLecteurPuceEID>${primaryLect?.hardwareVerified ? 'true' : 'false'}</SignatureLecteurPuceEID>`,
       `<SignatureLecteurIdentite>${xmlEscape(primaryLect ? `${primaryLect.signerName} (${primaryLect.signerEmail || primaryLect.signerUid})` : '')}</SignatureLecteurIdentite>`,
       `<SignatureLecteurReference>${xmlEscape(primaryLect?.verificationId || '')}</SignatureLecteurReference>`,
+      `<SignatureLecteurCertificat>${xmlEscape(primaryLect?.certSerial || '')}</SignatureLecteurCertificat>`,
+      `<SignatureLecteurAutorite>${xmlEscape(primaryLect?.certIssuer || '')}</SignatureLecteurAutorite>`,
+      `<SignatureLecteurOCSP>${xmlEscape(primaryLect?.ocspStatus || '')}</SignatureLecteurOCSP>`,
       `<SignatureLecteurHorodatage>${xmlEscape(primaryLect?.signedAt || '')}</SignatureLecteurHorodatage>`,
       `<SignatureLecteurEmpreinteDonneesSHA256>${xmlEscape(primaryLect?.documentSha256 || '')}</SignatureLecteurEmpreinteDonneesSHA256>`,
       `<SignatureLecteurPreuveECDSA>${xmlEscape(primaryLect?.cryptoDigest || '')}</SignatureLecteurPreuveECDSA>`,

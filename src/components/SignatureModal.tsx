@@ -1,34 +1,44 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
+  AlertTriangle,
   CheckCircle2,
   CreditCard,
   Fingerprint,
   Info,
+  RefreshCw,
   ShieldCheck,
+  Smartphone,
   X,
 } from 'lucide-react';
-import type { Journal } from '../types';
+import type { Chantier, Journal } from '../types';
 import { fmtDateFR } from '../utils/dates';
 import {
+  checkWebEidStatus,
+  createHardwareEidSession,
   createVerifiedSigningSession,
   formatSignatureMethodLabel,
   isWebAuthnSupported,
+  type SigningSessionMode,
   type VerifiedSigningSession,
+  type WebEidStatusInfo,
 } from '../utils/signatureCrypto';
 
 interface SignatureModalProps {
   open: boolean;
   role: 'controleur' | 'lecteur';
+  chantier: Chantier;
   defaultSignerName: string;
   signerEmail: string;
   signerUid: string;
+  getIdToken: () => Promise<string>;
   targetLabel: string;
   targetJournals: Journal[];
   existingSession: VerifiedSigningSession | null;
-  onSessionVerified: (session: VerifiedSigningSession) => void;
+  onSessionVerified: (session: VerifiedSigningSession | null) => void;
   onConfirmSign: (
     session: VerifiedSigningSession,
-    journalsToSign: Journal[]
+    journalsToSign: Journal[],
+    onProgress?: (current: number, total: number, journal: Journal) => void
   ) => Promise<void>;
   onClose: () => void;
 }
@@ -36,9 +46,11 @@ interface SignatureModalProps {
 export function SignatureModal({
   open,
   role,
+  chantier,
   defaultSignerName,
   signerEmail,
   signerUid,
+  getIdToken,
   targetLabel,
   targetJournals,
   existingSession,
@@ -46,14 +58,41 @@ export function SignatureModal({
   onConfirmSign,
   onClose,
 }: SignatureModalProps) {
-  const method = 'eid' as const;
+  const [mode, setMode] = useState<SigningSessionMode>(
+    existingSession?.mode || 'hardware_eid'
+  );
   const [signerName, setSignerName] = useState(
     existingSession?.signerName || defaultSignerName
   );
   const [nationalIdRaw, setNationalIdRaw] = useState('');
   const [useWebAuthn, setUseWebAuthn] = useState(isWebAuthnSupported());
+  const [webEidStatus, setWebEidStatus] = useState<WebEidStatusInfo | null>(
+    null
+  );
+  const [checkingReader, setCheckingReader] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [progressText, setProgressText] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const runReaderCheck = async () => {
+    setCheckingReader(true);
+    try {
+      const status = await checkWebEidStatus();
+      setWebEidStatus(status);
+    } finally {
+      setCheckingReader(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    setErrorMsg(null);
+    setProgressText(null);
+    if (existingSession) {
+      setMode(existingSession.mode);
+    }
+    void runReaderCheck();
+  }, [open, existingSession]);
 
   if (!open) return null;
 
@@ -61,7 +100,7 @@ export function SignatureModal({
   const roleLabel =
     role === 'controleur'
       ? 'Contrôleur responsable (INASEP)'
-      : 'Lecteur autorisé (accès temporaire)';
+      : 'Entrepreneur / Lecteur autorisé';
 
   const unsignedTarget = targetJournals.filter((j) =>
     role === 'controleur' ? !j.signatureControleur : !j.signatureLecteur
@@ -70,31 +109,67 @@ export function SignatureModal({
   const handleVerifyAndSign = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+    setProgressText(null);
 
-    if (!existingSession && !signerName.trim()) {
-      setErrorMsg('Veuillez confirmer votre nom et prénom complets.');
+    if (!unsignedTarget.length) {
+      setErrorMsg(
+        'Toutes les pages sélectionnées sont déjà signées pour ce rôle.'
+      );
       return;
     }
-    if (!unsignedTarget.length) {
-      setErrorMsg('Toutes les pages sélectionnées sont déjà signées pour ce rôle.');
+
+    if (
+      mode === 'account_fallback' &&
+      !existingSession &&
+      !signerName.trim()
+    ) {
+      setErrorMsg('Veuillez confirmer votre nom et prénom complets.');
       return;
     }
 
     setBusy(true);
     try {
       let session = existingSession;
-      if (!session) {
-        session = await createVerifiedSigningSession({
-          method,
-          signerUid,
-          signerName: signerName.trim(),
-          signerEmail,
-          nationalIdRaw,
-          useWebAuthn,
-        });
+      if (!session || session.mode !== mode) {
+        if (mode === 'hardware_eid') {
+          setProgressText(
+            'Lecture de la carte eID (confirmez la lecture si demandé)…'
+          );
+          session = await createHardwareEidSession({
+            signerUid,
+            signerEmail,
+            chantier,
+            sampleJournal: unsignedTarget[0],
+            getIdToken,
+          });
+        } else {
+          session = await createVerifiedSigningSession({
+            method: 'eid',
+            signerUid,
+            signerName: signerName.trim(),
+            signerEmail,
+            nationalIdRaw,
+            useWebAuthn,
+          });
+        }
         onSessionVerified(session);
       }
-      await onConfirmSign(session, unsignedTarget);
+
+      await onConfirmSign(
+        session,
+        unsignedTarget,
+        (current, total, currentJournal) => {
+          if (session?.mode === 'hardware_eid') {
+            setProgressText(
+              `Page ${current}/${total} (Journal N° ${currentJournal.journalNum}) : veuillez saisir votre code PIN eID…`
+            );
+          } else {
+            setProgressText(
+              `Scellement page ${current}/${total} (Journal N° ${currentJournal.journalNum})…`
+            );
+          }
+        }
+      );
       onClose();
     } catch (err) {
       setErrorMsg(
@@ -104,6 +179,7 @@ export function SignatureModal({
       );
     } finally {
       setBusy(false);
+      setProgressText(null);
     }
   };
 
@@ -122,7 +198,7 @@ export function SignatureModal({
               className="text-base font-bold text-slate-900 flex items-center gap-2"
             >
               <ShieldCheck className="w-5 h-5 text-[#0a5b9c]" />
-              Signature authentifiée (1 vérification)
+              Signature électronique e-ID
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
               {roleLabel} · {targetLabel}
@@ -146,7 +222,7 @@ export function SignatureModal({
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 space-y-1.5">
             <div className="text-xs font-bold text-slate-700">
               {unsignedTarget.length} page{unsignedTarget.length > 1 ? 's' : ''}{' '}
-              à signer (1 signature par page) :
+              à signer :
             </div>
             <div className="flex flex-wrap gap-1.5">
               {unsignedTarget.map((j) => (
@@ -162,95 +238,254 @@ export function SignatureModal({
 
           {existingSession ? (
             <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 space-y-1.5">
-              <div className="flex items-center gap-2 text-sm font-bold text-emerald-900">
-                <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
-                Vérification d&apos;identité active ({formatSignatureMethodLabel(existingSession.method)})
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm font-bold text-emerald-900">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+                  Session active (
+                  {formatSignatureMethodLabel(
+                    existingSession.method,
+                    existingSession.hardwareVerified
+                  )}
+                  )
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onSessionVerified(null)}
+                  className="text-[11px] font-semibold text-emerald-800 hover:underline cursor-pointer"
+                >
+                  Changer
+                </button>
               </div>
               <p className="text-xs text-emerald-800">
                 Signataire : <strong>{existingSession.signerName}</strong> · Réf.{' '}
                 <span className="font-mono">{existingSession.verificationId}</span>
               </p>
-              <p className="text-[11px] text-emerald-700">
-                Votre unique vérification de session reste active : aucune
-                nouvelle authentification n&apos;est nécessaire pour signer ces
-                pages.
-              </p>
+              {existingSession.mode === 'hardware_eid' ? (
+                <p className="text-[11px] text-emerald-700">
+                  Certificat :{' '}
+                  <span className="font-mono">
+                    {existingSession.certSerial}
+                  </span>{' '}
+                  ({existingSession.certIssuer}). Votre code PIN eID sera
+                  demandé par votre lecteur pour sceller chaque page.
+                </p>
+              ) : (
+                <p className="text-[11px] text-emerald-700">
+                  Votre vérification de session est active pour sceller ces pages.
+                </p>
+              )}
             </div>
           ) : (
             <>
-              {/* Identification method (e-ID) */}
-              <div className="rounded-xl border border-[#0a5b9c]/30 bg-[#0a5b9c]/[0.04] p-3 flex items-center gap-3">
-                <CreditCard className="w-5 h-5 text-[#0a5b9c] shrink-0" />
-                <div>
-                  <div className="text-sm font-bold text-slate-900">
-                    Signature électronique e-ID
+              {/* Mode Switcher */}
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode('hardware_eid');
+                    setErrorMsg(null);
+                  }}
+                  className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                    mode === 'hardware_eid'
+                      ? 'border-[#0a5b9c] bg-[#0a5b9c]/[0.06] ring-1 ring-[#0a5b9c]'
+                      : 'border-slate-200 bg-white hover:bg-slate-50'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 text-xs font-bold text-slate-900">
+                    <CreditCard className="w-4 h-4 text-[#0a5b9c] shrink-0" />
+                    Carte eID physique
                   </div>
-                  <div className="text-[11px] text-slate-600">
-                    Scellement SHA-256 + ECDSA P-256 lié à votre compte authentifié
+                  <div className="text-[11px] text-slate-500 mt-1">
+                    Lecteur USB PC + code PIN (Web-eID)
                   </div>
-                </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode('account_fallback');
+                    setErrorMsg(null);
+                  }}
+                  className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                    mode === 'account_fallback'
+                      ? 'border-[#0a5b9c] bg-[#0a5b9c]/[0.06] ring-1 ring-[#0a5b9c]'
+                      : 'border-slate-200 bg-white hover:bg-slate-50'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 text-xs font-bold text-slate-900">
+                    <Smartphone className="w-4 h-4 text-slate-600 shrink-0" />
+                    Sans lecteur PC
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-1">
+                    Compte authentifié + WebAuthn
+                  </div>
+                </button>
               </div>
 
-              {/* Identity fields */}
-              <div className="space-y-3">
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">
-                    Nom et prénom du signataire
-                  </label>
-                  <input
-                    type="text"
-                    value={signerName}
-                    onChange={(e) => setSignerName(e.target.value)}
-                    placeholder="ex. Fabien Pirquin"
-                    className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 text-sm text-slate-900 focus:outline-none focus:border-[#0a5b9c]"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">
-                    N° de carte eID / Registre national (optionnel, haché SHA-256)
-                  </label>
-                  <input
-                    type="text"
-                    value={nationalIdRaw}
-                    onChange={(e) => setNationalIdRaw(e.target.value)}
-                    placeholder="Non conservé en clair (empreinte SHA-256 uniquement)"
-                    className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 text-sm text-slate-900 focus:outline-none focus:border-[#0a5b9c]"
-                  />
-                </div>
-
-                {webAuthnAvailable && (
-                  <label className="flex items-start gap-2.5 p-3 rounded-xl border border-slate-200 bg-slate-50/70 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={useWebAuthn}
-                      onChange={(e) => setUseWebAuthn(e.target.checked)}
-                      className="mt-0.5 w-4 h-4 accent-[#0a5b9c]"
-                    />
-                    <div className="text-xs text-slate-700">
-                      <span className="font-semibold flex items-center gap-1.5">
-                        <Fingerprint className="w-3.5 h-3.5 text-[#0a5b9c]" />
-                        Confirmer par sécurité biométrique / code appareil (WebAuthn)
+              {mode === 'hardware_eid' ? (
+                <div className="space-y-3">
+                  {/* Live Web-eID Reader Status */}
+                  <div
+                    className={`rounded-xl border p-3.5 text-xs space-y-2 ${
+                      webEidStatus?.available
+                        ? 'border-emerald-200 bg-emerald-50 text-emerald-950'
+                        : 'border-amber-200 bg-amber-50 text-amber-950'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold flex items-center gap-1.5">
+                        {checkingReader ? (
+                          <>
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            Détection du lecteur Web-eID…
+                          </>
+                        ) : webEidStatus?.available ? (
+                          <>
+                            <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+                            Lecteur Web-eID prêt
+                          </>
+                        ) : (
+                          <>
+                            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+                            Extension ou lecteur Web-eID non détecté
+                          </>
+                        )}
                       </span>
-                      <span className="text-[11px] text-slate-500 block mt-0.5">
-                        Renforce la vérification d&apos;identité avant signature.
-                      </span>
+                      <button
+                        type="button"
+                        disabled={checkingReader}
+                        onClick={() => void runReaderCheck()}
+                        className="text-[11px] font-semibold underline cursor-pointer shrink-0 disabled:opacity-50"
+                      >
+                        Retester
+                      </button>
                     </div>
-                  </label>
-                )}
-              </div>
 
-              <div className="rounded-xl border border-blue-200 bg-blue-50/80 p-3 text-[11px] text-blue-900 flex items-start gap-2 leading-relaxed">
-                <Info className="w-4 h-4 text-[#0a5b9c] shrink-0 mt-0.5" />
-                <span>
-                  L&apos;application génère une empreinte cryptographique
-                  SHA-256 + ECDSA P-256 propre à chaque page signée et l&apos;inscrit
-                  dans les métadonnées du PDF. Une lecture directe avec code PIN
-                  via un lecteur USB sur PC requiert un module local (ex. Web-eID)
-                  ou une passerelle HTTPS serveur mTLS.
-                </span>
-              </div>
+                    {webEidStatus?.available ? (
+                      <p className="text-[11px] text-emerald-800">
+                        Extension Web-eID v{webEidStatus.extension || '?'} ·
+                        Application PC v{webEidStatus.nativeApp || '?'}.
+                        Insérez votre carte eID belge dans le lecteur : le nom
+                        et le certificat de signature (non-répudiation) seront
+                        lus directement depuis la puce et vérifiés côté serveur.
+                      </p>
+                    ) : (
+                      <div className="text-[11px] space-y-1.5 leading-relaxed">
+                        <p>{webEidStatus?.message}</p>
+                        <p className="text-amber-900">
+                          Prérequis PC :{' '}
+                          <a
+                            href="https://eid.belgium.be"
+                            target="_blank"
+                            rel="noreferrer"
+                            className="underline font-semibold"
+                          >
+                            Middleware eID Belgique
+                          </a>{' '}
+                          +{' '}
+                          <a
+                            href="https://web-eid.eu"
+                            target="_blank"
+                            rel="noreferrer"
+                            className="underline font-semibold"
+                          >
+                            Web-eID (extension + appli PC)
+                          </a>
+                          .
+                        </p>
+                        {webEidStatus?.inIframe && (
+                          <p className="font-semibold text-amber-950">
+                            Remarque : vous êtes actuellement dans un cadre
+                            intégré (iframe), où certains navigateurs bloquent
+                            l&apos;extension Web-eID. Ouvrez l&apos;URL
+                            directement dans un onglet Chrome ou Edge sur PC, ou
+                            utilisez le mode « Sans lecteur PC » sur
+                            tablette/mobile.
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-xl border border-blue-200 bg-blue-50/80 p-3 text-[11px] text-blue-900 flex items-start gap-2 leading-relaxed">
+                    <Info className="w-4 h-4 text-[#0a5b9c] shrink-0 mt-0.5" />
+                    <span>
+                      Votre carte eID signe avec la clé de{' '}
+                      <strong>Signature (Non-répudiation)</strong> l&apos;empreinte
+                      SHA-256 exacte de chaque page. Le serveur vérifie
+                      cryptographiquement la signature, la chaîne belge (Citizen
+                      CA) et le statut OCSP avant enregistrement.
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">
+                      Nom et prénom du signataire
+                    </label>
+                    <input
+                      type="text"
+                      value={signerName}
+                      onChange={(e) => setSignerName(e.target.value)}
+                      placeholder="ex. Fabien Pirquin"
+                      className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 text-sm text-slate-900 focus:outline-none focus:border-[#0a5b9c]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">
+                      N° de carte eID / Registre national (optionnel, haché
+                      SHA-256)
+                    </label>
+                    <input
+                      type="text"
+                      value={nationalIdRaw}
+                      onChange={(e) => setNationalIdRaw(e.target.value)}
+                      placeholder="Non conservé en clair (empreinte SHA-256 uniquement)"
+                      className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 text-sm text-slate-900 focus:outline-none focus:border-[#0a5b9c]"
+                    />
+                  </div>
+
+                  {webAuthnAvailable && (
+                    <label className="flex items-start gap-2.5 p-3 rounded-xl border border-slate-200 bg-slate-50/70 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={useWebAuthn}
+                        onChange={(e) => setUseWebAuthn(e.target.checked)}
+                        className="mt-0.5 w-4 h-4 accent-[#0a5b9c]"
+                      />
+                      <div className="text-xs text-slate-700">
+                        <span className="font-semibold flex items-center gap-1.5">
+                          <Fingerprint className="w-3.5 h-3.5 text-[#0a5b9c]" />
+                          Confirmer par sécurité biométrique / code appareil
+                          (WebAuthn)
+                        </span>
+                        <span className="text-[11px] text-slate-500 block mt-0.5">
+                          Renforce la vérification sur mobile ou tablette.
+                        </span>
+                      </div>
+                    </label>
+                  )}
+
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-600 flex items-start gap-2 leading-relaxed">
+                    <Info className="w-4 h-4 text-slate-500 shrink-0 mt-0.5" />
+                    <span>
+                      Mode de secours sans lecteur PC : l&apos;accord est scellé
+                      par SHA-256 + ECDSA P-256 lié à votre compte connecté
+                      (mentionné « e-ID (compte) » dans les détails).
+                    </span>
+                  </div>
+                </div>
+              )}
             </>
+          )}
+
+          {progressText && (
+            <div className="p-3 rounded-xl bg-blue-50 border border-blue-200 text-xs text-blue-900 flex items-center gap-2">
+              <RefreshCw className="w-4 h-4 animate-spin text-[#0a5b9c] shrink-0" />
+              <span>{progressText}</span>
+            </div>
           )}
 
           {errorMsg && (
@@ -262,8 +497,9 @@ export function SignatureModal({
           <div className="pt-1 flex flex-col-reverse sm:flex-row sm:justify-end gap-2.5">
             <button
               type="button"
+              disabled={busy}
               onClick={onClose}
-              className="min-h-[44px] px-5 rounded-xl border border-slate-200 bg-white text-slate-700 font-semibold text-sm hover:bg-slate-50 cursor-pointer"
+              className="min-h-[44px] px-5 rounded-xl border border-slate-200 bg-white text-slate-700 font-semibold text-sm hover:bg-slate-50 cursor-pointer disabled:opacity-50"
             >
               Annuler
             </button>
@@ -274,10 +510,12 @@ export function SignatureModal({
             >
               <ShieldCheck className="w-4 h-4" />
               {busy
-                ? 'Vérification et signature…'
-                : existingSession
-                  ? `Signer (${unsignedTarget.length} page${unsignedTarget.length > 1 ? 's' : ''})`
-                  : 'Vérifier (e-ID) & signer'}
+                ? 'Signature en cours…'
+                : mode === 'hardware_eid'
+                  ? `Signer avec carte eID (${unsignedTarget.length}p)`
+                  : existingSession
+                    ? `Signer (${unsignedTarget.length} page${unsignedTarget.length > 1 ? 's' : ''})`
+                    : 'Vérifier & signer'}
             </button>
           </div>
         </form>

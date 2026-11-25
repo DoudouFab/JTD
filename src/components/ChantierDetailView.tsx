@@ -1,12 +1,18 @@
 import { useState } from 'react';
 import {
+  Archive,
+  ArchiveRestore,
   ArrowLeft,
+  CalendarClock,
   CheckCircle2,
   Clock,
   Copy,
   FileDown,
+  FolderArchive,
   Lock,
+  PauseCircle,
   Pencil,
+  Play,
   Plus,
   Printer,
   RefreshCw,
@@ -23,6 +29,7 @@ import {
   weekKey,
   weekRangeLabel,
 } from '../utils/dates';
+import { formatStandbyLine } from '../utils/jdtStatus';
 import {
   formatSignatureMethodLabel,
   type VerifiedSigningSession,
@@ -45,6 +52,10 @@ interface ChantierDetailViewProps {
   onOpenJournal: (journalId: string) => void;
   onDuplicateJournal: (journal: Journal) => void;
   onDeleteJournal: (journal: Journal) => void;
+  onPutStandby?: () => void;
+  onOpenResumeModal?: () => void;
+  onArchiveChantier?: () => void;
+  onReopenChantier?: () => void;
   onSignJournals: (
     journalsToSign: Journal[],
     role: 'controleur' | 'lecteur',
@@ -73,6 +84,10 @@ export function ChantierDetailView({
   onOpenJournal,
   onDuplicateJournal,
   onDeleteJournal,
+  onPutStandby,
+  onOpenResumeModal,
+  onArchiveChantier,
+  onReopenChantier,
   onSignJournals,
   onPrintWeek,
   onExportWeekPdf,
@@ -86,6 +101,7 @@ export function ChantierDetailView({
   const currentRole: 'controleur' | 'lecteur' = isOwner
     ? 'controleur'
     : 'lecteur';
+  const jdtStatus = chantier.jdtStatus || 'active';
 
   const sorted = [...journals].sort(
     (a, b) =>
@@ -125,7 +141,7 @@ export function ChantierDetailView({
   const weeks = Object.keys(byWeek).sort().reverse();
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       {/* Top Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0">
@@ -198,7 +214,7 @@ export function ChantierDetailView({
                 <Pencil className="w-4 h-4" />
                 Modifier
                 {(chantier.readerEmails?.length || 0) > 0
-                  ? ` (${chantier.readerEmails!.length} e-mail${chantier.readerEmails!.length > 1 ? 's' : ''})`
+                  ? ` (${chantier.readerEmails!.length})`
                   : ''}
               </button>
               <button
@@ -208,7 +224,7 @@ export function ChantierDetailView({
                 title="Accorder un accès temporaire par code sur ce dossier"
               >
                 <Clock className="w-4 h-4" />
-                Code temporaire
+                Code
                 {(chantier.readerIds?.length || 0) > 0
                   ? ` (${chantier.readerIds!.length})`
                   : ''}
@@ -222,18 +238,133 @@ export function ChantierDetailView({
                 <Share2 className="w-4 h-4" />
                 HTML
               </button>
-              <button
-                type="button"
-                onClick={onNewJournal}
-                className="min-h-[44px] px-4 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-sm flex items-center gap-1.5 shadow-xs cursor-pointer"
-              >
-                <Plus className="w-4 h-4" />
-                Nouveau journal
-              </button>
+              {jdtStatus !== 'archived' && (
+                <button
+                  type="button"
+                  onClick={onNewJournal}
+                  className="min-h-[44px] px-4 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-sm flex items-center gap-1.5 shadow-xs cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  Nouveau journal
+                </button>
+              )}
             </>
           )}
         </div>
       </div>
+
+      {/* JDT Lifecycle Banner & Controls */}
+      {isOwner && jdtStatus === 'standby' && (
+        <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <PauseCircle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+            <div>
+              <div className="text-sm font-extrabold text-amber-950">
+                Chantier staté (stand-by)
+                {chantier.standbySince
+                  ? ` depuis le ${fmtDateFR(chantier.standbySince)}`
+                  : ''}
+              </div>
+              <p className="text-xs text-amber-800 mt-0.5">
+                Le suivi quotidien est en pause. Utilisez « Reprendre » pour
+                encoder la ou les dates de statage et ouvrir la page de reprise.
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {onOpenResumeModal && (
+              <button
+                type="button"
+                onClick={onOpenResumeModal}
+                className="min-h-[40px] px-4 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer"
+              >
+                <Play className="w-4 h-4" />
+                Reprendre le JDT
+              </button>
+            )}
+            {onArchiveChantier && (
+              <button
+                type="button"
+                onClick={onArchiveChantier}
+                className="min-h-[40px] px-3.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs sm:text-sm font-semibold flex items-center gap-1.5 cursor-pointer"
+              >
+                <Archive className="w-4 h-4" />
+                Clôturer JDT
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {isOwner && jdtStatus === 'archived' && (
+        <div className="rounded-2xl border border-slate-300 bg-slate-100 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <FolderArchive className="w-5 h-5 text-slate-600 shrink-0 mt-0.5" />
+            <div>
+              <div className="text-sm font-extrabold text-slate-900">
+                JDT clôturé et archivé
+                {chantier.closedAt
+                  ? ` le ${fmtDateFR(chantier.closedAt)}`
+                  : ''}
+              </div>
+              <p className="text-xs text-slate-600 mt-0.5">
+                Le décompte des jours est arrêté. Ce dossier est classé dans le
+                dossier Archives.
+              </p>
+            </div>
+          </div>
+          {onReopenChantier && (
+            <button
+              type="button"
+              onClick={onReopenChantier}
+              className="min-h-[40px] px-4 rounded-xl border border-[#0a5b9c] bg-white hover:bg-[#0a5b9c] hover:text-white text-[#0a5b9c] text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer shrink-0 transition-colors"
+            >
+              <ArchiveRestore className="w-4 h-4" />
+              Réouvrir le suivi
+            </button>
+          )}
+        </div>
+      )}
+
+      {isOwner && jdtStatus === 'active' && (onPutStandby || onOpenResumeModal || onArchiveChantier) && (
+        <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="text-xs font-semibold text-slate-600">
+            Suivi du journal de chantier :
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {onPutStandby && (
+              <button
+                type="button"
+                onClick={onPutStandby}
+                className="min-h-[38px] px-3 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+              >
+                <PauseCircle className="w-3.5 h-3.5" />
+                Chantier staté
+              </button>
+            )}
+            {onOpenResumeModal && (
+              <button
+                type="button"
+                onClick={onOpenResumeModal}
+                className="min-h-[38px] px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+              >
+                <CalendarClock className="w-3.5 h-3.5 text-[#0a5b9c]" />
+                Reprendre / Encoder un statage
+              </button>
+            )}
+            {onArchiveChantier && (
+              <button
+                type="button"
+                onClick={onArchiveChantier}
+                className="min-h-[38px] px-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+              >
+                <Archive className="w-3.5 h-3.5 text-slate-500" />
+                Clôturer JDT
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Reader Banner */}
       {!isOwner && (
@@ -267,7 +398,12 @@ export function ChantierDetailView({
             <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" />
             <span>
               Vérification active (
-              <strong>{formatSignatureMethodLabel(signingSession.method)}</strong>
+              <strong>
+                {formatSignatureMethodLabel(
+                  signingSession.method,
+                  signingSession.hardwareVerified
+                )}
+              </strong>
               ) pour <strong>{signingSession.signerName}</strong> · Réf.{' '}
               <span className="font-mono">{signingSession.verificationId}</span>{' '}
               — vous pouvez signer les pages sans nouvelle vérification.
@@ -284,7 +420,7 @@ export function ChantierDetailView({
       )}
 
       {/* Chantier Summary */}
-      <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5">
+      <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 space-y-4">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
           <div>
             <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
@@ -334,6 +470,21 @@ export function ChantierDetailView({
             </div>
           </div>
         </div>
+
+        {(chantier.standbyPeriods?.length || 0) > 0 && (
+          <div className="pt-3 border-t border-slate-100">
+            <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">
+              Historique des statages ({chantier.standbyPeriods!.length})
+            </div>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-700 tabular-nums">
+              {chantier.standbyPeriods!.map((p) => (
+                <span key={p.id}>
+                  • {formatStandbyLine(p.startDate, p.endDate, p.note)}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Filter */}
@@ -361,7 +512,7 @@ export function ChantierDetailView({
               ? 'Créez le premier journal quotidien (N° 1) pour démarrer le suivi.'
               : 'Aucun journal n’a encore été enregistré sur ce chantier.'}
           </p>
-          {isOwner && (
+          {isOwner && jdtStatus !== 'archived' && (
             <button
               type="button"
               onClick={onNewJournal}
@@ -592,7 +743,7 @@ export function ChantierDetailView({
                                 <CheckCircle2 className="w-3.5 h-3.5" />
                                 Contrôleur :{' '}
                                 {isSignedCtrl
-                                  ? `${j.signatureControleur!.signerName} (${formatSignatureMethodLabel(j.signatureControleur!.method)})`
+                                  ? `${j.signatureControleur!.signerName} (${formatSignatureMethodLabel(j.signatureControleur!.method, j.signatureControleur!.hardwareVerified)})`
                                   : 'Non signé'}
                               </span>
                               <span
@@ -605,7 +756,7 @@ export function ChantierDetailView({
                                 <CheckCircle2 className="w-3.5 h-3.5" />
                                 Lecteur :{' '}
                                 {isSignedReader
-                                  ? `${j.signatureLecteur!.signerName} (${formatSignatureMethodLabel(j.signatureLecteur!.method)})`
+                                  ? `${j.signatureLecteur!.signerName} (${formatSignatureMethodLabel(j.signatureLecteur!.method, j.signatureLecteur!.hardwareVerified)})`
                                   : 'Non signé'}
                               </span>
                             </div>
@@ -633,7 +784,7 @@ export function ChantierDetailView({
                             </button>
                           )}
 
-                          {isOwner && (
+                          {isOwner && jdtStatus !== 'archived' && (
                             <button
                               type="button"
                               onClick={() => onDuplicateJournal(j)}

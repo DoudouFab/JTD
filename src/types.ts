@@ -55,6 +55,14 @@ export interface PageSignatureRecord {
   documentSha256: string;
   cryptoDigest: string;
   webAuthnUsed: boolean;
+  hardwareVerified?: boolean;
+  certIssuer?: string;
+  certSerial?: string;
+  certThumbprint?: string;
+  certValidTo?: string;
+  ocspStatus?: string;
+  signatureAlgorithm?: string;
+  eidSignatureB64?: string;
 }
 
 export type JournalStatus = 'in_progress' | 'completed';
@@ -71,6 +79,8 @@ export interface Journal {
   chantierOwnerId?: string;
   chantierReaderIds?: string[];
   chantierReaderEmails?: string[];
+  chantierDelegateEmails?: string[];
+  preposeSurveillance?: string;
   authorId?: string;
   authorName?: string;
   status?: JournalStatus;
@@ -103,6 +113,16 @@ export type JournalLineField =
   | 'decisions'
   | 'visites';
 
+export type ChantierJdtStatus = 'active' | 'standby' | 'archived';
+
+export interface StandbyPeriod {
+  id: string;
+  startDate: string; // YYYY-MM-DD
+  endDate: string; // YYYY-MM-DD
+  resumeDate: string; // YYYY-MM-DD
+  note?: string;
+}
+
 export interface Chantier {
   id: string;
   ownerId?: string;
@@ -110,6 +130,8 @@ export interface Chantier {
   visibility?: 'private';
   readerIds?: string[];
   readerEmails?: string[];
+  delegateEmails?: string[];
+  delegateName?: string;
   readerAccessCode?: string;
   numero: string;
   projet: string;
@@ -121,6 +143,10 @@ export interface Chantier {
   horaireFin: string;
   preposeSurveillance: string;
   postes: string[];
+  jdtStatus?: ChantierJdtStatus;
+  standbySince?: string;
+  closedAt?: string;
+  standbyPeriods?: StandbyPeriod[];
 }
 
 export interface ShareInvite {

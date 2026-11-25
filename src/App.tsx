@@ -22,6 +22,7 @@ import { PdfProgressModal } from './components/PdfProgressModal';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { ShareAccessModal } from './components/ShareAccessModal';
 import { SignatureModal } from './components/SignatureModal';
+import { StandbyResumeModal } from './components/StandbyResumeModal';
 import { Toast, type ToastState } from './components/Toast';
 import { auth, isAdminEmail } from './firebase';
 import {
@@ -58,6 +59,7 @@ import {
   signJournalPageCloud,
 } from './utils/firestoreService';
 import { generateAndDeliverPdf, type PdfProgress } from './utils/pdfExport';
+import { formatStandbyLine } from './utils/jdtStatus';
 import { exportShareableHTML } from './utils/shareHtml';
 import {
   formatSignatureMethodLabel,
@@ -122,6 +124,9 @@ export default function App() {
   const [chantiersLoaded, setChantiersLoaded] = useState(false);
   const [refreshingChantiers, setRefreshingChantiers] = useState(false);
   const [chantierJournals, setChantierJournals] = useState<Journal[]>([]);
+  const [journalsByChantierId, setJournalsByChantierId] = useState<
+    Record<string, Journal[]>
+  >({});
   const [refreshingJournals, setRefreshingJournals] = useState(false);
 
   const [view, setView] = useState<ViewMode>('chantiers');
@@ -137,6 +142,8 @@ export default function App() {
   const [chantierModalOpen, setChantierModalOpen] = useState(false);
   const [editingChantier, setEditingChantier] = useState<Chantier | null>(null);
   const [shareAccessModalOpen, setShareAccessModalOpen] = useState(false);
+  const [standbyModalChantier, setStandbyModalChantier] =
+    useState<Chantier | null>(null);
 
   // Single-verification signing session & modal state
   const [signingSession, setSigningSession] =
@@ -349,6 +356,7 @@ export default function App() {
         setChantiers([]);
         setShareByChantierId({});
         setChantierJournals([]);
+        setJournalsByChantierId({});
         setChantiersLoaded(false);
         setView('chantiers');
         setCurrentChantierId(null);
@@ -362,6 +370,42 @@ export default function App() {
     });
     return () => unsub();
   }, [evaluateUserAccess]);
+
+  const hydrateAndFetchAllJournals = useCallback(
+    async (list: Chantier[], targetUser: User) => {
+      if (!list.length) {
+        setJournalsByChantierId({});
+        return;
+      }
+      const fromCache: Record<string, Journal[]> = {};
+      for (const ch of list) {
+        const cached = getCachedJournals(ch.id);
+        if (cached) fromCache[ch.id] = cached;
+      }
+      if (Object.keys(fromCache).length > 0) {
+        setJournalsByChantierId((prev) => ({ ...prev, ...fromCache }));
+      }
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
+      const results = await Promise.allSettled(
+        list.map((ch) =>
+          fetchChantierJournauxOnce(ch, targetUser.uid, targetUser.email).then(
+            (journals) => ({ chantierId: ch.id, journals })
+          )
+        )
+      );
+      const nextMap: Record<string, Journal[]> = {};
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          nextMap[r.value.chantierId] = r.value.journals;
+        }
+      }
+      if (Object.keys(nextMap).length > 0) {
+        setJournalsByChantierId((prev) => ({ ...prev, ...nextMap }));
+      }
+    },
+    []
+  );
 
   const refreshChantiersFromCloud = useCallback(
     async (targetUser: User, silent = false) => {
@@ -377,6 +421,7 @@ export default function App() {
         setChantiers(res.chantiers);
         setShareByChantierId(res.shareByChantierId);
         setChantiersLoaded(true);
+        void hydrateAndFetchAllJournals(res.chantiers, targetUser);
         if (!silent) {
           notify(
             res.fromCache
@@ -399,7 +444,7 @@ export default function App() {
         setRefreshingChantiers(false);
       }
     },
-    [notify]
+    [notify, hydrateAndFetchAllJournals]
   );
 
   // Load Chantiers once approved: show local cache immediately, and sync latest version from cloud when online
@@ -416,6 +461,7 @@ export default function App() {
       setChantiers([]);
       setShareByChantierId({});
       setChantierJournals([]);
+      setJournalsByChantierId({});
       setChantiersLoaded(false);
       return;
     }
@@ -425,6 +471,14 @@ export default function App() {
       setChantiers(cached.chantiers);
       setShareByChantierId(cached.shareByChantierId);
       setChantiersLoaded(true);
+      const cachedJournals: Record<string, Journal[]> = {};
+      for (const ch of cached.chantiers) {
+        const cj = getCachedJournals(ch.id);
+        if (cj) cachedJournals[ch.id] = cj;
+      }
+      if (Object.keys(cachedJournals).length > 0) {
+        setJournalsByChantierId(cachedJournals);
+      }
     }
 
     // Always pull latest version from Firestore when online so any platform stays up-to-date
@@ -634,6 +688,7 @@ export default function App() {
           targetUser.email
         );
         setChantierJournals(list);
+        setJournalsByChantierId((prev) => ({ ...prev, [chantier.id]: list }));
         if (!silent) {
           notify('Journaux actualisés.', 'success');
         }
@@ -641,6 +696,10 @@ export default function App() {
         const cached = getCachedJournals(chantier.id);
         if (cached) {
           setChantierJournals(cached);
+          setJournalsByChantierId((prev) => ({
+            ...prev,
+            [chantier.id]: cached,
+          }));
         }
         if (!silent) {
           notify(
@@ -871,18 +930,379 @@ export default function App() {
   // Journal CRUD
   const updateJournalsAndCache = useCallback(
     (chantierId: string, updater: (prev: Journal[]) => Journal[]) => {
-      setChantierJournals((prev) => {
-        const next = updater(prev).sort(
+      setJournalsByChantierId((prevMap) => {
+        const base = prevMap[chantierId] || [];
+        const next = updater(base).sort(
           (a, b) =>
             (a.date || '').localeCompare(b.date || '') ||
             a.journalNum - b.journalNum
         );
         setCachedJournals(chantierId, next);
+        return { ...prevMap, [chantierId]: next };
+      });
+      if (currentChantierId === chantierId) {
+        setChantierJournals((prev) => {
+          const next = updater(prev).sort(
+            (a, b) =>
+              (a.date || '').localeCompare(b.date || '') ||
+              a.journalNum - b.journalNum
+          );
+          setCachedJournals(chantierId, next);
+          return next;
+        });
+      }
+    },
+    [currentChantierId]
+  );
+
+  const buildBlankJournalForChantier = useCallback(
+    (
+      chantier: Chantier,
+      targetUser: User,
+      journalNum: number,
+      date: string,
+      prevJournal?: Journal | null,
+      options?: { emptyOuvriers?: boolean; travaux?: string[]; status?: 'in_progress' | 'completed' }
+    ): Journal => ({
+      id: uid(),
+      chantierId: chantier.id,
+      chantierOwnerId: chantier.ownerId || targetUser.uid,
+      chantierReaderIds: chantier.readerIds || [],
+      chantierReaderEmails: chantier.readerEmails || [],
+      authorId: targetUser.uid,
+      authorName:
+        profile?.displayName ||
+        targetUser.displayName ||
+        targetUser.email?.split('@')[0] ||
+        'Utilisateur',
+      status: options?.status || 'in_progress',
+      journalNum,
+      date,
+      horaireDebut:
+        chantier.horaireDebut || profile?.defaultHoraireDebut || '07:30',
+      horaireFin: chantier.horaireFin || profile?.defaultHoraireFin || '16:30',
+      tempMatin: '',
+      tempApresMidi: '',
+      etatAtmo: [],
+      ouvriers: options?.emptyOuvriers
+        ? []
+        : [{ firme: chantier.entrepriseNom || '', metier: '', nbre: 1 }],
+      travaux:
+        options?.travaux !== undefined
+          ? options.travaux
+          : prevJournal
+            ? [...(prevJournal.travaux || []).filter((x) => x.trim())]
+            : [],
+      materiel: [],
+      materiaux: [],
+      essais: [],
+      evenements: [],
+      decisions: [],
+      visites: [],
+      sigEntrepreneur: prevJournal?.sigEntrepreneur || '',
+      signatureControleur: null,
+      signatureLecteur: null,
+    }),
+    [profile]
+  );
+
+  const handleOpenTodayJournal = async (ch: Chantier) => {
+    if (!user) return;
+    await flushPendingJournalSave();
+    setCurrentChantierId(ch.id);
+
+    let list = journalsByChantierId[ch.id] || getCachedJournals(ch.id) || [];
+    if (!list.length && (typeof navigator === 'undefined' || navigator.onLine)) {
+      try {
+        list = await fetchChantierJournauxOnce(ch, user.uid, user.email);
+      } catch {
+        // keep cached empty
+      }
+    }
+
+    const today = todayISO();
+    const sortedAsc = [...list].sort(
+      (a, b) =>
+        (a.date || '').localeCompare(b.date || '') ||
+        a.journalNum - b.journalNum
+    );
+    const todayMatches = sortedAsc.filter((j) => j.date === today);
+    if (todayMatches.length > 0) {
+      const target = todayMatches[todayMatches.length - 1];
+      setChantierJournals(sortedAsc);
+      setEditingJournalDraft(target);
+      setCurrentJournalId(target.id);
+      setView('journal');
+      window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+      return;
+    }
+
+    if (ch.ownerId !== user.uid || ch.jdtStatus === 'archived') {
+      setChantierJournals(sortedAsc);
+      setView('chantier');
+      return;
+    }
+
+    const maxNum = sortedAsc.reduce((m, j) => Math.max(m, j.journalNum || 0), 0);
+    const prevJournal = sortedAsc.length > 0 ? sortedAsc[sortedAsc.length - 1] : null;
+    const newJ = buildBlankJournalForChantier(ch, user, maxNum + 1, today, prevJournal);
+
+    try {
+      await saveJournalCloud(newJ, ch, user);
+      const nextList = [...sortedAsc, newJ];
+      setChantierJournals(nextList);
+      setJournalsByChantierId((prev) => ({ ...prev, [ch.id]: nextList }));
+      setCachedJournals(ch.id, nextList);
+      setEditingJournalDraft(newJ);
+      setCurrentJournalId(newJ.id);
+      setView('journal');
+      window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+    } catch (err) {
+      notify(formatActionError(err, 'Impossible de créer le journal du jour.'), 'error');
+    }
+  };
+
+  const updateChantierInState = useCallback(
+    (saved: Chantier) => {
+      if (!user) return;
+      setChantiers((prev) => {
+        const next = [...prev.filter((c) => c.id !== saved.id), saved].sort(
+          (a, b) =>
+            (a.numero || a.projet || '').localeCompare(
+              b.numero || b.projet || ''
+            )
+        );
+        setCachedChantiersBundle(user.uid, {
+          chantiers: next,
+          shareByChantierId,
+        });
         return next;
       });
     },
-    []
+    [user, shareByChantierId]
   );
+
+  const handlePutChantierStandby = async (ch: Chantier) => {
+    if (!user || ch.ownerId !== user.uid) return;
+    try {
+      const saved = await saveChantierCloud(
+        {
+          ...ch,
+          jdtStatus: 'standby',
+          standbySince: todayISO(),
+        },
+        user
+      );
+      updateChantierInState(saved);
+      notify(
+        `Chantier « ${saved.numero || saved.projet} » mis en stand-by (staté).`,
+        'success'
+      );
+    } catch (err) {
+      notify(
+        formatActionError(err, 'Impossible de mettre le chantier en stand-by.'),
+        'error'
+      );
+    }
+  };
+
+  const handleConfirmStandbyResume = async (
+    ch: Chantier,
+    params: {
+      periods: { id: string; startDate: string; endDate: string; note: string }[];
+      resumeDate: string;
+      openResumeJournal: boolean;
+    }
+  ) => {
+    if (!user || ch.ownerId !== user.uid) return;
+    await flushPendingJournalSave();
+
+    let list = journalsByChantierId[ch.id] || getCachedJournals(ch.id) || [];
+    if (typeof navigator === 'undefined' || navigator.onLine) {
+      try {
+        list = await fetchChantierJournauxOnce(ch, user.uid, user.email);
+      } catch {
+        // fallback to existing list
+      }
+    }
+
+    const working = [...list].sort(
+      (a, b) =>
+        (a.date || '').localeCompare(b.date || '') ||
+        a.journalNum - b.journalNum
+    );
+    let maxNum = working.reduce((m, j) => Math.max(m, j.journalNum || 0), 0);
+    const latestPrev =
+      working.length > 0 ? working[working.length - 1] : null;
+
+    const sortedPeriods = [...params.periods].sort((a, b) =>
+      a.startDate.localeCompare(b.startDate)
+    );
+
+    for (const period of sortedPeriods) {
+      const line = formatStandbyLine(
+        period.startDate,
+        period.endDate,
+        period.note
+      );
+      const existingUnsigned = working.find(
+        (j) =>
+          j.date === period.startDate &&
+          !j.signatureControleur &&
+          !j.signatureLecteur
+      );
+
+      if (existingUnsigned) {
+        const cleanTravaux = (existingUnsigned.travaux || [])
+          .map((t) => t.trim())
+          .filter(Boolean);
+        const alreadyHasLine = cleanTravaux.some((t) => t === line);
+        const updatedJournal: Journal = {
+          ...existingUnsigned,
+          status: 'completed',
+          travaux: alreadyHasLine ? cleanTravaux : [...cleanTravaux, line],
+        };
+        await saveJournalCloud(updatedJournal, ch, user);
+        const idx = working.findIndex((j) => j.id === existingUnsigned.id);
+        if (idx >= 0) working[idx] = updatedJournal;
+      } else {
+        maxNum += 1;
+        const standbyJournal = buildBlankJournalForChantier(
+          ch,
+          user,
+          maxNum,
+          period.startDate,
+          latestPrev,
+          {
+            emptyOuvriers: true,
+            travaux: [line],
+            status: 'completed',
+          }
+        );
+        await saveJournalCloud(standbyJournal, ch, user);
+        working.push(standbyJournal);
+      }
+    }
+
+    let resumeJournal = working.find((j) => j.date === params.resumeDate) || null;
+    if (!resumeJournal) {
+      maxNum += 1;
+      resumeJournal = buildBlankJournalForChantier(
+        ch,
+        user,
+        maxNum,
+        params.resumeDate,
+        latestPrev,
+        {
+          emptyOuvriers: false,
+          travaux: [],
+          status: 'in_progress',
+        }
+      );
+      await saveJournalCloud(resumeJournal, ch, user);
+      working.push(resumeJournal);
+    }
+
+    const updatedPeriods = [
+      ...(ch.standbyPeriods || []),
+      ...sortedPeriods.map((p) => ({
+        id: p.id,
+        startDate: p.startDate,
+        endDate: p.endDate,
+        resumeDate: params.resumeDate,
+        note: p.note.trim() || undefined,
+      })),
+    ];
+
+    const savedChantier = await saveChantierCloud(
+      {
+        ...ch,
+        jdtStatus: 'active',
+        standbySince: '',
+        closedAt: '',
+        standbyPeriods: updatedPeriods,
+      },
+      user
+    );
+
+    const finalSorted = working.sort(
+      (a, b) =>
+        (a.date || '').localeCompare(b.date || '') ||
+        a.journalNum - b.journalNum
+    );
+    updateChantierInState(savedChantier);
+    setJournalsByChantierId((prev) => ({ ...prev, [ch.id]: finalSorted }));
+    setCachedJournals(ch.id, finalSorted);
+    if (currentChantierId === ch.id) {
+      setChantierJournals(finalSorted);
+    }
+
+    setStandbyModalChantier(null);
+    notify(
+      `Statage enregistré et suivi repris au ${fmtDateFR(params.resumeDate)} (Journal N° ${resumeJournal.journalNum}).`,
+      'success'
+    );
+
+    if (params.openResumeJournal && resumeJournal) {
+      setCurrentChantierId(ch.id);
+      setChantierJournals(finalSorted);
+      setEditingJournalDraft(resumeJournal);
+      setCurrentJournalId(resumeJournal.id);
+      setView('journal');
+      window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+    }
+  };
+
+  const handleArchiveChantier = (ch: Chantier) => {
+    if (!user || ch.ownerId !== user.uid) return;
+    setConfirmState({
+      title: 'Clôturer ce JDT et archiver ?',
+      message: `Le chantier « ${ch.numero || ''} ${ch.projet || ''} » sera classé dans le dossier Archives et le décompte des jours sera arrêté.`,
+      confirmLabel: 'Clôturer et archiver',
+      onConfirm: async () => {
+        setConfirmState(null);
+        try {
+          const saved = await saveChantierCloud(
+            {
+              ...ch,
+              jdtStatus: 'archived',
+              standbySince: '',
+              closedAt: todayISO(),
+            },
+            user
+          );
+          updateChantierInState(saved);
+          notify('JDT clôturé et classé dans le dossier Archives.', 'success');
+        } catch (err) {
+          notify(
+            formatActionError(err, 'Impossible de clôturer ce chantier.'),
+            'error'
+          );
+        }
+      },
+    });
+  };
+
+  const handleReopenChantier = async (ch: Chantier) => {
+    if (!user || ch.ownerId !== user.uid) return;
+    try {
+      const saved = await saveChantierCloud(
+        {
+          ...ch,
+          jdtStatus: 'active',
+          closedAt: '',
+        },
+        user
+      );
+      updateChantierInState(saved);
+      notify('Suivi du JDT réouvert dans les chantiers en cours.', 'success');
+    } catch (err) {
+      notify(
+        formatActionError(err, 'Impossible de réouvrir ce chantier.'),
+        'error'
+      );
+    }
+  };
 
   const handleNewJournal = async () => {
     if (!currentChantier || !user) return;
@@ -896,42 +1316,13 @@ export default function App() {
     const maxNum = sorted.reduce((m, j) => Math.max(m, j.journalNum || 0), 0);
     const prevJournal = sorted[0];
 
-    const newJ: Journal = {
-      id: uid(),
-      chantierId: currentChantier.id,
-      chantierOwnerId: currentChantier.ownerId || user.uid,
-      chantierReaderIds: currentChantier.readerIds || [],
-      chantierReaderEmails: currentChantier.readerEmails || [],
-      authorId: user.uid,
-      authorName:
-        profile?.displayName ||
-        user.displayName ||
-        user.email?.split('@')[0] ||
-        'Utilisateur',
-      status: 'in_progress',
-      journalNum: maxNum + 1,
-      date: todayISO(),
-      horaireDebut:
-        currentChantier.horaireDebut || profile?.defaultHoraireDebut || '07:30',
-      horaireFin:
-        currentChantier.horaireFin || profile?.defaultHoraireFin || '16:30',
-      tempMatin: '',
-      tempApresMidi: '',
-      etatAtmo: [],
-      ouvriers: [{ firme: currentChantier.entrepriseNom || '', metier: '', nbre: 1 }],
-      travaux: prevJournal
-        ? [...(prevJournal.travaux || []).filter((x) => x.trim())]
-        : [],
-      materiel: [],
-      materiaux: [],
-      essais: [],
-      evenements: [],
-      decisions: [],
-      visites: [],
-      sigEntrepreneur: prevJournal?.sigEntrepreneur || '',
-      signatureControleur: null,
-      signatureLecteur: null,
-    };
+    const newJ = buildBlankJournalForChantier(
+      currentChantier,
+      user,
+      maxNum + 1,
+      todayISO(),
+      prevJournal
+    );
 
     try {
       await saveJournalCloud(newJ, currentChantier, user);
@@ -1094,22 +1485,26 @@ export default function App() {
     }
   };
 
-  // Single-verification signing engine (1 verification -> 1 signature per page)
+  // Single-verification signing engine (hardware eID or verified session -> 1 signature per page)
   const executeSignJournals = useCallback(
     async (
       session: VerifiedSigningSession,
       role: 'controleur' | 'lecteur',
-      journalsToSign: Journal[]
+      journalsToSign: Journal[],
+      onProgress?: (current: number, total: number, journal: Journal) => void
     ) => {
       if (!currentChantier) return;
       await flushPendingJournalSave();
 
-      for (const j of journalsToSign) {
+      for (let i = 0; i < journalsToSign.length; i += 1) {
+        const j = journalsToSign[i];
         if (j.status !== 'completed') {
           throw new Error(
             `Le Journal N° ${j.journalNum} doit d'abord être marqué comme terminé.`
           );
         }
+        onProgress?.(i + 1, journalsToSign.length, j);
+
         const sigRecord = await signJournalPageWithSession(
           session,
           role,
@@ -1145,7 +1540,7 @@ export default function App() {
       }
 
       notify(
-        `${journalsToSign.length} page${journalsToSign.length > 1 ? 's' : ''} signée${journalsToSign.length > 1 ? 's' : ''} (${formatSignatureMethodLabel(session.method)}).`,
+        `${journalsToSign.length} page${journalsToSign.length > 1 ? 's' : ''} signée${journalsToSign.length > 1 ? 's' : ''} (${formatSignatureMethodLabel(session.method, session.hardwareVerified)}).`,
         'success'
       );
     },
@@ -1172,7 +1567,11 @@ export default function App() {
       return;
     }
 
-    if (signingSession && signingSession.signerUid === user.uid) {
+    if (
+      signingSession &&
+      signingSession.signerUid === user.uid &&
+      signingSession.mode === 'account_fallback'
+    ) {
       try {
         await executeSignJournals(signingSession, role, unsigned);
       } catch (err) {
@@ -1575,6 +1974,7 @@ export default function App() {
           {view === 'chantiers' && (
             <ChantiersView
               chantiers={chantiers}
+              journalsByChantierId={journalsByChantierId}
               shareByChantierId={shareByChantierId}
               currentUserId={user.uid}
               isColleagueOrAdmin={isColleagueOrAdmin}
@@ -1587,6 +1987,11 @@ export default function App() {
                 setView('chantier');
                 window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
               }}
+              onOpenTodayJournal={(ch) => void handleOpenTodayJournal(ch)}
+              onPutChantierStandby={(ch) => void handlePutChantierStandby(ch)}
+              onOpenResumeModal={(ch) => setStandbyModalChantier(ch)}
+              onArchiveChantier={handleArchiveChantier}
+              onReopenChantier={(ch) => void handleReopenChantier(ch)}
               onNewChantier={() => {
                 setEditingChantier(null);
                 setChantierModalOpen(true);
@@ -1644,6 +2049,10 @@ export default function App() {
               }}
               onDuplicateJournal={handleDuplicateJournal}
               onDeleteJournal={handleDeleteJournal}
+              onPutStandby={() => void handlePutChantierStandby(currentChantier)}
+              onOpenResumeModal={() => setStandbyModalChantier(currentChantier)}
+              onArchiveChantier={() => handleArchiveChantier(currentChantier)}
+              onReopenChantier={() => void handleReopenChantier(currentChantier)}
               onSignJournals={(list, role, label) => {
                 void handleRequestSignJournals(list, role, label);
               }}
@@ -1748,29 +2157,42 @@ export default function App() {
         />
       )}
 
-      {signModalState && (
+      {signModalState && currentChantier && (
         <SignatureModal
           open={Boolean(signModalState)}
           role={signModalState.role}
+          chantier={currentChantier}
           defaultSignerName={
             effectiveProfile.defaultPrepose || effectiveProfile.displayName
           }
           signerEmail={user.email || ''}
           signerUid={user.uid}
+          getIdToken={() => user.getIdToken()}
           targetLabel={signModalState.targetLabel}
           targetJournals={signModalState.targetJournals}
           existingSession={signingSession}
           onSessionVerified={setSigningSession}
-          onConfirmSign={async (session, journalsToSign) => {
+          onConfirmSign={async (session, journalsToSign, onProgress) => {
             await executeSignJournals(
               session,
               signModalState.role,
-              journalsToSign
+              journalsToSign,
+              onProgress
             );
           }}
           onClose={() => setSignModalState(null)}
         />
       )}
+
+      <StandbyResumeModal
+        open={Boolean(standbyModalChantier)}
+        chantier={standbyModalChantier}
+        onClose={() => setStandbyModalChantier(null)}
+        onConfirm={async (params) => {
+          if (!standbyModalChantier) return;
+          await handleConfirmStandbyResume(standbyModalChantier, params);
+        }}
+      />
 
       <ConfirmModal
         open={Boolean(confirmState)}

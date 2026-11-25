@@ -102,7 +102,10 @@ function renderSheetHTML(ch: Chantier, j: Journal): string {
   const hFin = fmtHourFR(j.horaireFin || ch.horaireFin);
 
   const supervisorName =
-    j.signatureControleur?.signerName || ch.preposeSurveillance || '';
+    j.signatureControleur?.signerName ||
+    j.preposeSurveillance ||
+    ch.preposeSurveillance ||
+    '';
 
   const abRowsHtml = Array.from({ length: abMiddleRows - 1 })
     .map((_, idx) => {
@@ -165,6 +168,11 @@ function renderSheetHTML(ch: Chantier, j: Journal): string {
 
   const sigControleurMetaHtml = j.signatureControleur
     ? `<div class="a4-sign-meta">
+        ${
+          j.signatureControleur.hardwareVerified
+            ? `<div>Certifié puce eID${j.signatureControleur.certSerial ? ` · Cert. ${escHtml(j.signatureControleur.certSerial.slice(0, 16))}` : ''}</div>`
+            : ''
+        }
         <div>Le ${escHtml(new Date(j.signatureControleur.signedAt).toLocaleString('fr-BE'))}</div>
         <div class="a4-sign-mono">Réf. ${escHtml(j.signatureControleur.verificationId)}</div>
         <div class="a4-sign-hash">SHA-256 : ${escHtml(j.signatureControleur.documentSha256)}</div>
@@ -174,6 +182,11 @@ function renderSheetHTML(ch: Chantier, j: Journal): string {
   const sigLecteurHtml = j.signatureLecteur
     ? `<div class="a4-sign-name">${escHtml(j.signatureLecteur.signerName)}</div>
       <div class="a4-sign-meta">
+        ${
+          j.signatureLecteur.hardwareVerified
+            ? `<div>Certifié puce eID${j.signatureLecteur.certSerial ? ` · Cert. ${escHtml(j.signatureLecteur.certSerial.slice(0, 16))}` : ''}</div>`
+            : ''
+        }
         <div>Le ${escHtml(new Date(j.signatureLecteur.signedAt).toLocaleString('fr-BE'))}</div>
         <div class="a4-sign-mono">Réf. ${escHtml(j.signatureLecteur.verificationId)}</div>
         <div class="a4-sign-hash">SHA-256 : ${escHtml(j.signatureLecteur.documentSha256)}</div>
