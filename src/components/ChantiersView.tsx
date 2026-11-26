@@ -4,6 +4,7 @@ import {
   ArchiveRestore,
   Building2,
   CalendarClock,
+  CalendarOff,
   Check,
   ChevronRight,
   Clock,
@@ -24,7 +25,7 @@ import {
   UserCheck,
 } from 'lucide-react';
 import type { Chantier, ChantierShare, Journal } from '../types';
-import { fmtDateFR, todayISO } from '../utils/dates';
+import { fmtDateFR, fmtDateJJMMAA, getChantierDisplayTitle, todayISO } from '../utils/dates';
 import { computeChantierJdtSummary, type ChantierJdtSummary } from '../utils/jdtStatus';
 
 interface ChantiersViewProps {
@@ -42,6 +43,7 @@ interface ChantiersViewProps {
   onOpenTodayJournal: (ch: Chantier) => void;
   onPutChantierStandby: (ch: Chantier) => void;
   onOpenResumeModal: (ch: Chantier) => void;
+  onOpenJcModal?: (ch: Chantier) => void;
   onArchiveChantier: (ch: Chantier) => void;
   onReopenChantier: (ch: Chantier) => void;
   onNewChantier: () => void;
@@ -157,6 +159,7 @@ export function ChantiersView({
   onOpenTodayJournal,
   onPutChantierStandby,
   onOpenResumeModal,
+  onOpenJcModal,
   onArchiveChantier,
   onReopenChantier,
   onNewChantier,
@@ -247,6 +250,7 @@ export function ChantiersView({
     if (scope === 'shared' && isMine) return false;
     if (!normalizedQuery) return true;
     const hay = [
+      chantier.pseudo,
       chantier.numero,
       chantier.projet,
       chantier.references,
@@ -402,23 +406,20 @@ export function ChantiersView({
           ) : isTodayDone ? (
             <div className="rounded-lg bg-emerald-50 border border-emerald-200 px-2.5 py-1.5 flex items-center justify-between gap-1.5">
               <div className="flex items-center gap-2 min-w-0">
-                <div className="w-6 h-6 rounded-full bg-emerald-600 text-white flex items-center justify-center shrink-0 font-black text-xs shadow-xs">
+                <div className="w-6 h-6 rounded-full bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-xs">
                   <Check className="w-3.5 h-3.5 stroke-[3]" />
                 </div>
                 <div className="min-w-0">
                   <div className="text-[11px] font-extrabold text-emerald-900 truncate">
-                    Terminé ✓
+                    Terminé
                   </div>
                   <div className="text-[10px] font-medium text-emerald-700 tabular-nums truncate">
                     {remainingDays > 0
                       ? `OK · ${remainingDays} à valider`
-                      : `J. N° ${summary.todayJournal?.journalNum} OK`}
+                      : `${fmtDateJJMMAA(summary.todayJournal?.date)} OK`}
                   </div>
                 </div>
               </div>
-              <span className="text-sm font-black text-emerald-700 shrink-0">
-                V
-              </span>
             </div>
           ) : hasOpenJdt && remainingDays > 0 ? (
             <div className="rounded-lg bg-amber-50/90 border border-amber-200 px-2.5 py-1.5 flex items-center justify-between gap-1.5">
@@ -428,7 +429,7 @@ export function ChantiersView({
                 </div>
                 <div className="text-[10px] font-medium text-amber-800 tabular-nums truncate">
                   {summary.todayJournal
-                    ? `J. N° ${summary.todayJournal.journalNum} en cours`
+                    ? `${fmtDateJJMMAA(summary.todayJournal.date)} en cours`
                     : summary.missingWorkdaysCount > 0
                       ? `${summary.missingWorkdaysCount} manquant(s)`
                       : `${summary.inProgressCount} en cours`}
@@ -448,7 +449,7 @@ export function ChantiersView({
                   </div>
                   <div className="text-[10px] text-slate-600 tabular-nums truncate">
                     {summary.latestJournal
-                      ? `J. N° ${summary.latestJournal.journalNum} (${fmtDateFR(summary.latestJournal.date)})`
+                      ? `${fmtDateJJMMAA(summary.latestJournal.date)} · N° ${summary.latestJournal.journalNum}`
                       : 'Prêt'}
                   </div>
                 </div>
@@ -471,8 +472,8 @@ export function ChantiersView({
                   {ch.numero || 'Sans N°'}
                   {ch.references ? ` · ${ch.references}` : ''}
                 </div>
-                <h2 className="text-sm font-extrabold text-slate-900 mt-0.5 line-clamp-2 leading-snug group-hover:text-[#0a5b9c] transition-colors">
-                  {ch.projet || 'Projet sans titre'}
+                <h2 className="text-base font-black text-slate-900 mt-0.5 line-clamp-2 leading-snug tracking-tight group-hover:text-[#0a5b9c] transition-colors">
+                  {getChantierDisplayTitle(ch)}
                 </h2>
               </div>
               <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-[#0a5b9c] shrink-0 mt-0.5 transition-colors" />
@@ -485,7 +486,7 @@ export function ChantiersView({
               <div className="flex items-center justify-between gap-1.5 text-slate-500 tabular-nums">
                 <span className="truncate">
                   {summary.latestJournal
-                    ? `J. N° ${summary.latestJournal.journalNum} · ${fmtDateFR(summary.latestJournal.date)}`
+                    ? `${fmtDateJJMMAA(summary.latestJournal.date)} · N° ${summary.latestJournal.journalNum}`
                     : ch.preposeSurveillance || '—'}
                 </span>
                 <span className="shrink-0 font-semibold text-slate-700">
@@ -494,8 +495,14 @@ export function ChantiersView({
               </div>
               {(ch.standbyPeriods?.length || 0) > 0 && (
                 <div className="text-[10px] text-amber-800 font-medium tabular-nums truncate">
-                  {ch.standbyPeriods!.length} statage
-                  {ch.standbyPeriods!.length > 1 ? 's' : ''}
+                  {(() => {
+                    const sb = ch.standbyPeriods!.filter((p) => (p.kind || 'standby') === 'standby').length;
+                    const jc = ch.standbyPeriods!.filter((p) => p.kind === 'jc').length;
+                    return [
+                      sb > 0 ? `${sb} statage${sb > 1 ? 's' : ''}` : '',
+                      jc > 0 ? `${jc} JC` : '',
+                    ].filter(Boolean).join(' · ');
+                  })()}
                 </div>
               )}
             </div>
@@ -546,6 +553,18 @@ export function ChantiersView({
                 >
                   <PauseCircle className="w-3 h-3" />
                   Staté
+                </button>
+              )}
+
+              {isOwner && !isStandby && onOpenJcModal && (
+                <button
+                  type="button"
+                  onClick={() => onOpenJcModal(ch)}
+                  title="Encoder des congés entreprise (JC) en 1 page récapitulative"
+                  className="min-h-[34px] px-2 rounded-lg border border-sky-200 bg-sky-50 hover:bg-sky-100 text-sky-900 text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                >
+                  <CalendarOff className="w-3 h-3" />
+                  JC
                 </button>
               )}
 
@@ -740,7 +759,7 @@ export function ChantiersView({
 
           <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-3 py-2 flex items-center justify-between gap-2">
             <span className="text-[11px] font-bold uppercase tracking-wide text-emerald-700 truncate">
-              Validés aujourd&apos;hui (V)
+              Validés aujourd&apos;hui
             </span>
             <span className="text-lg font-extrabold text-emerald-800 tabular-nums shrink-0">
               {doneTodayCount}

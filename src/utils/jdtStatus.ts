@@ -1,5 +1,5 @@
 import type { Chantier, ChantierJdtStatus, Journal, StandbyPeriod } from '../types';
-import { fmtDateFR, todayISO } from './dates';
+import { fmtDateFR, fmtDateJJMM, fmtDateJJMMAA, todayISO } from './dates';
 
 export interface ChantierJdtSummary {
   effectiveStatus: ChantierJdtStatus;
@@ -47,6 +47,59 @@ export function formatStandbyLine(
   const base = `Chantier staté du ${fmtDateFR(startDate)} au ${fmtDateFR(endDate)}`;
   const cleanNote = (note || '').trim();
   return cleanNote ? `${base} (${cleanNote})` : base;
+}
+
+export function formatJcLine(
+  startDate: string,
+  endDate: string,
+  note?: string
+): string {
+  const sameDay = !endDate || startDate === endDate;
+  const base = sameDay
+    ? `Congé Entreprise (JC) le ${fmtDateFR(startDate)}`
+    : `Congé Entreprise (JC) du ${fmtDateFR(startDate)} au ${fmtDateFR(endDate)}`;
+  const cleanNote = (note || '').trim();
+  return cleanNote ? `${base} (${cleanNote})` : base;
+}
+
+export function formatPeriodRecapLine(
+  startDate: string,
+  endDate: string,
+  kind: 'standby' | 'jc' = 'standby',
+  note?: string
+): string {
+  return kind === 'jc'
+    ? formatJcLine(startDate, endDate, note)
+    : formatStandbyLine(startDate, endDate, note);
+}
+
+export function detectJournalPeriodKind(j: Journal): 'standby' | 'jc' | null {
+  if (j.specialType === 'standby' || j.specialType === 'jc') {
+    return j.specialType;
+  }
+  const firstLine = (j.travaux?.[0] || '').trim();
+  if (/^Chantier staté du /i.test(firstLine)) return 'standby';
+  if (/^Congé Entreprise \(JC\)/i.test(firstLine)) return 'jc';
+  return null;
+}
+
+export function formatJournalDateTabLabel(j: Journal): string {
+  const kind = detectJournalPeriodKind(j);
+  const start = j.periodStart || j.date;
+  const end = j.periodEnd || j.date;
+  if (kind === 'standby') {
+    if (start && end && start !== end) {
+      return `Staté ${fmtDateJJMM(start)}→${fmtDateJJMMAA(end)}`;
+    }
+    return `Staté ${fmtDateJJMMAA(start)}`;
+  }
+  if (kind === 'jc') {
+    if (start && end && start !== end) {
+      return `JC ${fmtDateJJMM(start)}→${fmtDateJJMMAA(end)}`;
+    }
+    return `JC ${fmtDateJJMMAA(start)}`;
+  }
+  return fmtDateJJMMAA(j.date);
 }
 
 export function computeChantierJdtSummary(

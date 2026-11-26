@@ -4,6 +4,7 @@ import {
   ArchiveRestore,
   ArrowLeft,
   CalendarClock,
+  CalendarOff,
   CheckCircle2,
   Clock,
   Copy,
@@ -20,16 +21,22 @@ import {
   Share2,
   ShieldCheck,
   Trash2,
+  UserCheck,
   Users,
 } from 'lucide-react';
 import type { Chantier, ChantierShare, Journal } from '../types';
 import {
   dayNameFR,
   fmtDateFR,
+  getChantierDisplayTitle,
   weekKey,
   weekRangeLabel,
 } from '../utils/dates';
-import { formatStandbyLine } from '../utils/jdtStatus';
+import {
+  detectJournalPeriodKind,
+  formatJournalDateTabLabel,
+  formatPeriodRecapLine,
+} from '../utils/jdtStatus';
 import {
   formatSignatureMethodLabel,
   type VerifiedSigningSession,
@@ -41,6 +48,7 @@ interface ChantierDetailViewProps {
   journals: Journal[];
   shareInfo: ChantierShare | null;
   currentUserId: string;
+  currentUserEmail?: string;
   signingSession: VerifiedSigningSession | null;
   onResetSigningSession: () => void;
   onSelectChantier: (id: string) => void;
@@ -54,6 +62,7 @@ interface ChantierDetailViewProps {
   onDeleteJournal: (journal: Journal) => void;
   onPutStandby?: () => void;
   onOpenResumeModal?: () => void;
+  onOpenJcModal?: () => void;
   onArchiveChantier?: () => void;
   onReopenChantier?: () => void;
   onSignJournals: (
@@ -73,6 +82,7 @@ export function ChantierDetailView({
   journals,
   shareInfo,
   currentUserId,
+  currentUserEmail = '',
   signingSession,
   onResetSigningSession,
   onSelectChantier,
@@ -86,6 +96,7 @@ export function ChantierDetailView({
   onDeleteJournal,
   onPutStandby,
   onOpenResumeModal,
+  onOpenJcModal,
   onArchiveChantier,
   onReopenChantier,
   onSignJournals,
@@ -98,7 +109,17 @@ export function ChantierDetailView({
   const normalizedQuery = query.trim().toLowerCase();
 
   const isOwner = chantier.ownerId === currentUserId;
-  const currentRole: 'controleur' | 'lecteur' = isOwner
+  const emailLower = currentUserEmail.trim().toLowerCase();
+  const isDelegate =
+    !isOwner &&
+    Boolean(
+      emailLower &&
+        (chantier.delegateEmails || []).some(
+          (em) => em.trim().toLowerCase() === emailLower
+        )
+    );
+  const canAuthor = isOwner || isDelegate;
+  const currentRole: 'controleur' | 'lecteur' = canAuthor
     ? 'controleur'
     : 'lecteur';
   const jdtStatus = chantier.jdtStatus || 'active';
@@ -120,8 +141,10 @@ export function ChantierDetailView({
     if (!normalizedQuery) return true;
     const hay = [
       String(j.journalNum),
+      formatJournalDateTabLabel(j),
       fmtDateFR(j.date),
       dayNameFR(j.date),
+      j.preposeSurveillance || '',
       ...(j.travaux || []),
       ...(j.evenements || []),
       ...(j.decisions || []),
@@ -163,7 +186,9 @@ export function ChantierDetailView({
                 ·{' '}
                 {isOwner
                   ? 'Dossier personnel'
-                  : 'Accès lecture & signature'}
+                  : isDelegate
+                    ? 'Rédacteur remplaçant autorisé'
+                    : 'Accès lecture & signature'}
               </span>
             </div>
             {allChantiers.length > 1 ? (
@@ -171,18 +196,18 @@ export function ChantierDetailView({
                 value={chantier.id}
                 onChange={(e) => onSelectChantier(e.target.value)}
                 aria-label="Changer de chantier"
-                className="mt-0.5 max-w-full bg-transparent text-lg sm:text-xl font-extrabold text-slate-900 focus:outline-none cursor-pointer truncate pr-2"
+                className="mt-0.5 max-w-full bg-transparent text-lg sm:text-xl font-black text-slate-900 focus:outline-none cursor-pointer truncate pr-2"
               >
                 {allChantiers.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.numero ? `${c.numero} — ` : ''}
-                    {c.projet || 'Projet sans titre'}
+                    {getChantierDisplayTitle(c)}
                   </option>
                 ))}
               </select>
             ) : (
-              <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 truncate">
-                {chantier.projet || 'Projet sans titre'}
+              <h1 className="text-lg sm:text-xl font-black text-slate-900 truncate">
+                {getChantierDisplayTitle(chantier)}
               </h1>
             )}
           </div>
@@ -219,6 +244,22 @@ export function ChantierDetailView({
               </button>
               <button
                 type="button"
+                onClick={onEditChantier}
+                className={`min-h-[44px] px-3.5 rounded-xl border font-semibold text-sm flex items-center gap-1.5 cursor-pointer ${
+                  (chantier.delegateEmails?.length || 0) > 0
+                    ? 'border-indigo-300 bg-indigo-50 hover:bg-indigo-100 text-indigo-800'
+                    : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+                }`}
+                title="Transférer l'autorisation de rédaction de ce chantier par e-mail"
+              >
+                <UserCheck className="w-4 h-4 text-indigo-600" />
+                <span className="hidden sm:inline">Transférer rédaction</span>
+                {(chantier.delegateEmails?.length || 0) > 0
+                  ? ` (${chantier.delegateEmails!.length})`
+                  : ''}
+              </button>
+              <button
+                type="button"
                 onClick={onOpenShareAccess}
                 className="min-h-[44px] px-3.5 rounded-xl border border-[#0a5b9c]/35 bg-[#0a5b9c]/[0.06] hover:bg-[#0a5b9c]/10 text-[#0a5b9c] font-semibold text-sm flex items-center gap-1.5 cursor-pointer"
                 title="Accorder un accès temporaire par code sur ce dossier"
@@ -238,17 +279,17 @@ export function ChantierDetailView({
                 <Share2 className="w-4 h-4" />
                 HTML
               </button>
-              {jdtStatus !== 'archived' && (
-                <button
-                  type="button"
-                  onClick={onNewJournal}
-                  className="min-h-[44px] px-4 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-sm flex items-center gap-1.5 shadow-xs cursor-pointer"
-                >
-                  <Plus className="w-4 h-4" />
-                  Nouveau journal
-                </button>
-              )}
             </>
+          )}
+          {canAuthor && jdtStatus !== 'archived' && (
+            <button
+              type="button"
+              onClick={onNewJournal}
+              className="min-h-[44px] px-4 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-sm flex items-center gap-1.5 shadow-xs cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              Nouveau journal
+            </button>
           )}
         </div>
       </div>
@@ -267,7 +308,7 @@ export function ChantierDetailView({
               </div>
               <p className="text-xs text-amber-800 mt-0.5">
                 Le suivi quotidien est en pause. Utilisez « Reprendre » pour
-                encoder la ou les dates de statage et ouvrir la page de reprise.
+                encoder la ou les dates de statage ou annuler la mise en stand-by.
               </p>
             </div>
           </div>
@@ -279,7 +320,7 @@ export function ChantierDetailView({
                 className="min-h-[40px] px-4 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer"
               >
                 <Play className="w-4 h-4" />
-                Reprendre le JDT
+                Reprendre / Annuler
               </button>
             )}
             {onArchiveChantier && (
@@ -326,48 +367,73 @@ export function ChantierDetailView({
         </div>
       )}
 
-      {isOwner && jdtStatus === 'active' && (onPutStandby || onOpenResumeModal || onArchiveChantier) && (
-        <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 flex flex-wrap items-center justify-between gap-2">
-          <div className="text-xs font-semibold text-slate-600">
-            Suivi du journal de chantier :
+      {isOwner &&
+        jdtStatus === 'active' &&
+        (onPutStandby || onOpenResumeModal || onOpenJcModal || onArchiveChantier) && (
+          <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs font-semibold text-slate-600">
+              Suivi du journal de chantier :
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {onPutStandby && (
+                <button
+                  type="button"
+                  onClick={onPutStandby}
+                  className="min-h-[38px] px-3 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <PauseCircle className="w-3.5 h-3.5" />
+                  Chantier staté
+                </button>
+              )}
+              {onOpenJcModal && (
+                <button
+                  type="button"
+                  onClick={onOpenJcModal}
+                  className="min-h-[38px] px-3 rounded-xl border border-sky-200 bg-sky-50 hover:bg-sky-100 text-sky-900 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <CalendarOff className="w-3.5 h-3.5" />
+                  Encoder JC (congés)
+                </button>
+              )}
+              {onOpenResumeModal && (
+                <button
+                  type="button"
+                  onClick={onOpenResumeModal}
+                  className="min-h-[38px] px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <CalendarClock className="w-3.5 h-3.5 text-[#0a5b9c]" />
+                  Reprendre / Encoder statage
+                </button>
+              )}
+              {onArchiveChantier && (
+                <button
+                  type="button"
+                  onClick={onArchiveChantier}
+                  className="min-h-[38px] px-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Archive className="w-3.5 h-3.5 text-slate-500" />
+                  Clôturer JDT
+                </button>
+              )}
+            </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {onPutStandby && (
-              <button
-                type="button"
-                onClick={onPutStandby}
-                className="min-h-[38px] px-3 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-              >
-                <PauseCircle className="w-3.5 h-3.5" />
-                Chantier staté
-              </button>
-            )}
-            {onOpenResumeModal && (
-              <button
-                type="button"
-                onClick={onOpenResumeModal}
-                className="min-h-[38px] px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-              >
-                <CalendarClock className="w-3.5 h-3.5 text-[#0a5b9c]" />
-                Reprendre / Encoder un statage
-              </button>
-            )}
-            {onArchiveChantier && (
-              <button
-                type="button"
-                onClick={onArchiveChantier}
-                className="min-h-[38px] px-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-              >
-                <Archive className="w-3.5 h-3.5 text-slate-500" />
-                Clôturer JDT
-              </button>
-            )}
+        )}
+
+      {/* Delegate Banner OR Reader Banner */}
+      {isDelegate ? (
+        <div className="rounded-2xl border border-indigo-200 bg-indigo-50/90 p-4 flex items-start gap-3">
+          <UserCheck className="w-5 h-5 text-indigo-700 shrink-0 mt-0.5" />
+          <div className="text-xs text-indigo-950 leading-relaxed">
+            <strong>Transfert d&apos;autorisation de rédaction actif</strong>{' '}
+            (ce chantier uniquement) : vous pouvez créer de nouvelles pages,
+            compléter les pages <strong>En cours</strong> et les signer (via{' '}
+            <strong>e-ID</strong>) en votre propre nom — le préposé à la
+            surveillance est automatiquement adapté à votre nom pour les jours
+            concernés. Les pages déjà validées restent verrouillées et non
+            modifiables.
           </div>
         </div>
-      )}
-
-      {/* Reader Banner */}
-      {!isOwner && (
+      ) : !isOwner ? (
         <div className="rounded-2xl border border-amber-200 bg-amber-50/80 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
           <div className="flex items-start gap-3">
             <Lock className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
@@ -389,7 +455,7 @@ export function ChantierDetailView({
             </div>
           )}
         </div>
-      )}
+      ) : null}
 
       {/* Active Single-Verification Session Bar */}
       {signingSession && (
@@ -456,6 +522,12 @@ export function ChantierDetailView({
               Horaire : {chantier.horaireDebut || '07:30'} –{' '}
               {chantier.horaireFin || '16:30'}
             </div>
+            {(chantier.delegateEmails?.length || 0) > 0 && (
+              <div className="text-xs text-indigo-700 font-semibold mt-0.5 truncate">
+                Remplaçant :{' '}
+                {chantier.delegateName || chantier.delegateEmails!.join(', ')}
+              </div>
+            )}
           </div>
 
           <div>
@@ -463,7 +535,7 @@ export function ChantierDetailView({
               Bordereau &amp; journaux
             </div>
             <div className="font-semibold text-slate-900 mt-0.5 tabular-nums">
-              {journals.length} journal{journals.length > 1 ? 'aux' : ''}
+              {journals.length} page{journals.length > 1 ? 's' : ''}
             </div>
             <div className="text-xs text-slate-500 mt-0.5 tabular-nums">
               {chantier.postes.length} poste(s) Excel chargé(s)
@@ -474,18 +546,69 @@ export function ChantierDetailView({
         {(chantier.standbyPeriods?.length || 0) > 0 && (
           <div className="pt-3 border-t border-slate-100">
             <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">
-              Historique des statages ({chantier.standbyPeriods!.length})
+              Statages &amp; congés (JC) enregistrés (
+              {chantier.standbyPeriods!.length})
             </div>
             <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-700 tabular-nums">
               {chantier.standbyPeriods!.map((p) => (
                 <span key={p.id}>
-                  • {formatStandbyLine(p.startDate, p.endDate, p.note)}
+                  •{' '}
+                  {formatPeriodRecapLine(
+                    p.startDate,
+                    p.endDate,
+                    p.kind || 'standby',
+                    p.note
+                  )}
                 </span>
               ))}
             </div>
           </div>
         )}
       </div>
+
+      {/* Horizontal Date Tabs (JJ/MM/AA or single-page Staté / JC recap) */}
+      {sorted.length > 0 && (
+        <div className="rounded-2xl border border-slate-200 bg-white px-3.5 py-2.5">
+          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-2">
+            Pages du dossier par date (JJ/MM/AA)
+          </div>
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
+            {[...sorted].reverse().map((j) => {
+              const kind = detectJournalPeriodKind(j);
+              const isCompleted = j.status === 'completed';
+              const isSignedBoth =
+                Boolean(j.signatureControleur) && Boolean(j.signatureLecteur);
+
+              return (
+                <button
+                  key={j.id}
+                  type="button"
+                  onClick={() => onOpenJournal(j.id)}
+                  title={`Journal N° ${j.journalNum} · ${fmtDateFR(j.date)}`}
+                  className={`min-h-[34px] px-3 rounded-lg border text-xs font-bold whitespace-nowrap shrink-0 tabular-nums flex items-center gap-1.5 cursor-pointer transition-colors ${
+                    kind === 'jc'
+                      ? 'border-sky-300 bg-sky-50 hover:bg-sky-100 text-sky-900'
+                      : kind === 'standby'
+                        ? 'border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900'
+                        : isSignedBoth
+                          ? 'border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900'
+                          : isCompleted
+                            ? 'border-[#0a5b9c]/35 bg-[#0a5b9c]/[0.06] hover:bg-[#0a5b9c]/10 text-[#0a5b9c]'
+                            : 'border-amber-300 bg-amber-50/70 hover:bg-amber-100 text-amber-900'
+                  }`}
+                >
+                  <span>{formatJournalDateTabLabel(j)}</span>
+                  {isSignedBoth ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  ) : !isCompleted ? (
+                    <Clock className="w-3 h-3 text-amber-700 shrink-0" />
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Filter */}
       {journals.length > 0 && (
@@ -495,7 +618,7 @@ export function ChantierDetailView({
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Filtrer les journaux par N°, date, travaux, firme, événement…"
+            placeholder="Filtrer les journaux par date (JJ/MM/AA), travaux, firme, événement…"
             className="w-full min-h-[44px] pl-10 pr-4 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-[#0a5b9c] focus:ring-2 focus:ring-[#0a5b9c]/15"
           />
         </div>
@@ -508,18 +631,18 @@ export function ChantierDetailView({
             Aucun journal pour ce chantier
           </h2>
           <p className="text-sm text-slate-500 mt-1">
-            {isOwner
-              ? 'Créez le premier journal quotidien (N° 1) pour démarrer le suivi.'
+            {canAuthor
+              ? 'Créez la première page quotidienne pour démarrer le suivi.'
               : 'Aucun journal n’a encore été enregistré sur ce chantier.'}
           </p>
-          {isOwner && jdtStatus !== 'archived' && (
+          {canAuthor && jdtStatus !== 'archived' && (
             <button
               type="button"
               onClick={onNewJournal}
               className="mt-4 min-h-[44px] px-5 rounded-xl bg-[#0a5b9c] hover:bg-[#063f6e] text-white font-semibold text-sm inline-flex items-center gap-2 cursor-pointer"
             >
               <Plus className="w-4 h-4" />
-              Créer le journal N° 1
+              Ouvrir le 1er journal
             </button>
           )}
         </div>
@@ -562,13 +685,16 @@ export function ChantierDetailView({
               allCompleted && signedReaderCount === fullWeekJournals.length;
             const allFullySigned = allSignedCtrl && allSignedReader;
 
-            const completedUnsignedInWeek = fullWeekJournals.filter(
-              (j) =>
-                j.status === 'completed' &&
-                (currentRole === 'controleur'
-                  ? !j.signatureControleur
-                  : !j.signatureLecteur)
-            );
+            const completedUnsignedInWeek = fullWeekJournals.filter((j) => {
+              if (j.status !== 'completed') return false;
+              if (currentRole === 'controleur') {
+                return (
+                  !j.signatureControleur &&
+                  (isOwner || j.authorId === currentUserId)
+                );
+              }
+              return !j.signatureLecteur;
+            });
 
             return (
               <section
@@ -627,7 +753,7 @@ export function ChantierDetailView({
                       </button>
                     )}
 
-                    {(isOwner || allFullySigned) && (
+                    {(canAuthor || allFullySigned) && (
                       <button
                         type="button"
                         onClick={() => onPrintWeek(fullWeekJournals)}
@@ -677,6 +803,8 @@ export function ChantierDetailView({
                         ? j.etatAtmo.join(', ')
                         : 'Aucun détail saisi');
 
+                    const periodKind = detectJournalPeriodKind(j);
+                    const tabLabel = formatJournalDateTabLabel(j);
                     const isPageCompleted = j.status === 'completed';
                     const isSignedCtrl = Boolean(j.signatureControleur);
                     const isSignedReader = Boolean(j.signatureLecteur);
@@ -684,7 +812,8 @@ export function ChantierDetailView({
                     const needsMySignature =
                       isPageCompleted &&
                       (currentRole === 'controleur'
-                        ? !isSignedCtrl
+                        ? !isSignedCtrl &&
+                          (isOwner || j.authorId === currentUserId)
                         : !isSignedReader);
 
                     return (
@@ -695,12 +824,28 @@ export function ChantierDetailView({
                       >
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                            <span className="text-sm font-bold text-[#0a5b9c] tabular-nums">
-                              Journal N° {j.journalNum}
+                            <span
+                              className={`text-sm font-extrabold tabular-nums ${
+                                periodKind === 'jc'
+                                  ? 'text-sky-800'
+                                  : periodKind === 'standby'
+                                    ? 'text-amber-800'
+                                    : 'text-[#0a5b9c]'
+                              }`}
+                            >
+                              {tabLabel}
                             </span>
-                            <span className="text-sm font-semibold text-slate-900 tabular-nums">
-                              {dayNameFR(j.date)} {fmtDateFR(j.date)}
+                            <span className="text-sm font-semibold text-slate-900">
+                              {dayNameFR(j.date)}
                             </span>
+                            <span className="text-xs font-mono text-slate-400 tabular-nums">
+                              N° {j.journalNum}
+                            </span>
+                            {periodKind && (
+                              <span className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
+                                1 page récap
+                              </span>
+                            )}
                             <span
                               className={`text-[11px] font-bold px-2 py-0.5 rounded-md ${
                                 isPageCompleted
@@ -716,10 +861,19 @@ export function ChantierDetailView({
                                 Verrouillée
                               </span>
                             )}
-                            <span className="text-xs text-slate-500 inline-flex items-center gap-1 tabular-nums">
-                              <Users className="w-3.5 h-3.5 text-slate-400" />
-                              {totalOuv} ouvrier{totalOuv > 1 ? 's' : ''}
-                            </span>
+                            {j.preposeSurveillance &&
+                              j.preposeSurveillance !==
+                                chantier.preposeSurveillance && (
+                                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-800 border border-indigo-200">
+                                  Préposé : {j.preposeSurveillance}
+                                </span>
+                              )}
+                            {!periodKind && (
+                              <span className="text-xs text-slate-500 inline-flex items-center gap-1 tabular-nums">
+                                <Users className="w-3.5 h-3.5 text-slate-400" />
+                                {totalOuv} ouvrier{totalOuv > 1 ? 's' : ''}
+                              </span>
+                            )}
                           </div>
 
                           <p className="text-xs text-slate-600 truncate mt-1">
@@ -774,7 +928,7 @@ export function ChantierDetailView({
                                 onSignJournals(
                                   [j],
                                   currentRole,
-                                  `Journal N° ${j.journalNum} (${fmtDateFR(j.date)})`
+                                  `${tabLabel} (N° ${j.journalNum})`
                                 )
                               }
                               className="min-h-[38px] px-3 rounded-xl border border-[#0a5b9c] text-[#0a5b9c] hover:bg-[#0a5b9c] hover:text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
@@ -784,7 +938,7 @@ export function ChantierDetailView({
                             </button>
                           )}
 
-                          {isOwner && jdtStatus !== 'archived' && (
+                          {canAuthor && jdtStatus !== 'archived' && (
                             <button
                               type="button"
                               onClick={() => onDuplicateJournal(j)}

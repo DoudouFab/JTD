@@ -31,7 +31,8 @@ import {
   type JournalLineField,
   type Ouvrier,
 } from '../types';
-import { dayNameFR, fmtDateFR } from '../utils/dates';
+import { dayNameFR, fmtDateFR, getChantierDisplayTitle } from '../utils/dates';
+import { formatJournalDateTabLabel } from '../utils/jdtStatus';
 import {
   addWordToCustomDictionary,
   checkJournalSpelling,
@@ -49,10 +50,14 @@ import { AutocompleteInput } from './AutocompleteInput';
 interface JournalEditorViewProps {
   chantier: Chantier;
   journal: Journal;
+  allJournals?: Journal[];
   previousJournal: Journal | null;
   isOwner: boolean;
+  isDelegate?: boolean;
+  currentUserId?: string;
   firmSuggestions: string[];
   travauxSuggestions: string[];
+  onSelectJournal?: (journalId: string) => void;
   onChange: (updated: Journal) => void;
   onToggleStatus: (nextStatus: 'in_progress' | 'completed') => void;
   onSignPage: (role: 'controleur' | 'lecteur') => void;
@@ -67,10 +72,14 @@ const PRIMARY_LINE_KEYS = new Set<JournalLineField>(['travaux', 'materiel']);
 export function JournalEditorView({
   chantier,
   journal,
+  allJournals = [],
   previousJournal,
   isOwner,
+  isDelegate = false,
+  currentUserId = '',
   firmSuggestions,
   travauxSuggestions,
+  onSelectJournal,
   onChange,
   onToggleStatus,
   onSignPage,
@@ -79,8 +88,9 @@ export function JournalEditorView({
   onExportDayPdf,
   onNotify,
 }: JournalEditorViewProps) {
+  const canAuthorRole = isOwner || isDelegate;
   const [mobileTab, setMobileTab] = useState<'form' | 'preview'>(
-    isOwner ? 'form' : 'preview'
+    canAuthorRole ? 'form' : 'preview'
   );
   const [spellOpen, setSpellOpen] = useState(false);
   const [customDict, setCustomDict] = useState<Set<string>>(() =>
@@ -96,13 +106,18 @@ export function JournalEditorView({
   const isSignedCtrl = Boolean(journal.signatureControleur);
   const isSignedReader = Boolean(journal.signatureLecteur);
   const isSignedAny = isSignedCtrl || isSignedReader;
-  const readOnly = !isOwner || isSignedAny;
-  const currentRole: 'controleur' | 'lecteur' = isOwner
+  const delegateLocked = isDelegate && isCompleted;
+  const readOnly = !canAuthorRole || isSignedAny || delegateLocked;
+  const currentRole: 'controleur' | 'lecteur' = canAuthorRole
     ? 'controleur'
     : 'lecteur';
+  const canMarkCompleted = canAuthorRole && !isSignedAny && !isCompleted;
+  const canReopenToInProgress = isOwner && !isSignedAny && isCompleted;
   const needsMySignature =
     isCompleted &&
-    (currentRole === 'controleur' ? !isSignedCtrl : !isSignedReader);
+    (currentRole === 'controleur'
+      ? !isSignedCtrl && (isOwner || journal.authorId === currentUserId)
+      : !isSignedReader);
 
   const spellIssues = useMemo(
     () => (readOnly ? [] : checkJournalSpelling(journal, customDict)),
@@ -433,8 +448,8 @@ export function JournalEditorView({
           <div className="min-w-0">
             <div className="text-xs font-mono font-semibold text-[#0a5b9c] truncate flex items-center gap-2">
               <span className="tabular-nums">
-                {chantier.numero || 'Chantier'} · J. N° {journal.journalNum} ·{' '}
-                {fmtDateFR(journal.date)}
+                {chantier.numero || 'Chantier'} · {formatJournalDateTabLabel(journal)} · N°{' '}
+                {journal.journalNum}
               </span>
               <span
                 className={`font-sans text-[11px] font-bold px-2 py-0.5 rounded-md ${
@@ -446,8 +461,8 @@ export function JournalEditorView({
                 {isCompleted ? 'Terminée ✓' : 'En cours'}
               </span>
             </div>
-            <h1 className="text-base sm:text-lg font-extrabold text-slate-900 truncate">
-              {chantier.projet || 'Journal des travaux'}
+            <h1 className="text-base sm:text-lg font-black text-slate-900 truncate">
+              {getChantierDisplayTitle(chantier)}
             </h1>
           </div>
         </div>
@@ -476,7 +491,7 @@ export function JournalEditorView({
             </button>
           )}
 
-          {isOwner && !isSignedAny && (
+          {(canMarkCompleted || canReopenToInProgress) && (
             <button
               type="button"
               onClick={() =>
@@ -513,7 +528,7 @@ export function JournalEditorView({
             </button>
           )}
 
-          {isOwner && (
+          {canAuthorRole && (
             <>
               <button
                 type="button"
@@ -536,16 +551,50 @@ export function JournalEditorView({
         </div>
       </div>
 
+      {/* Horizontal Date Tabs (JJ/MM/AA) across pages in this dossier */}
+      {allJournals.length > 0 && onSelectJournal && (
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
+          {[...allJournals]
+            .sort(
+              (a, b) =>
+                (a.date || '').localeCompare(b.date || '') ||
+                a.journalNum - b.journalNum
+            )
+            .map((j) => {
+              const isCurrent = j.id === journal.id;
+              return (
+                <button
+                  key={j.id}
+                  type="button"
+                  onClick={() => onSelectJournal(j.id)}
+                  title={`Journal N° ${j.journalNum} · ${fmtDateFR(j.date)}`}
+                  className={`min-h-[34px] px-3 rounded-lg border text-xs font-bold whitespace-nowrap shrink-0 tabular-nums cursor-pointer transition-colors ${
+                    isCurrent
+                      ? 'border-[#0a5b9c] bg-[#0a5b9c] text-white shadow-xs'
+                      : j.status === 'completed'
+                        ? 'border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100'
+                        : 'border-slate-200 bg-white text-slate-700 hover:border-[#0a5b9c]/50'
+                  }`}
+                >
+                  {formatJournalDateTabLabel(j)}
+                </button>
+              );
+            })}
+        </div>
+      )}
+
       {/* Read-only / Locked Notice */}
       {readOnly && (
         <div className="rounded-2xl border border-amber-200 bg-amber-50/80 px-4 py-3 flex items-center gap-3 text-xs text-amber-950">
           <Lock className="w-4 h-4 text-amber-700 shrink-0" />
           <span>
-            {!isOwner
-              ? isSignedAny
-                ? 'Consultation en lecture seule · Cette page a reçu une signature authentifiée et est définitivement verrouillée.'
-                : 'Consultation en lecture seule (accès temporaire sur ce dossier uniquement).'
-              : 'Cette page a reçu au moins une signature authentifiée et est définitivement verrouillée en modification.'}
+            {delegateLocked
+              ? 'Page terminée et verrouillée : en tant que rédacteur remplaçant, vous ne pouvez plus modifier une page déjà validée (vous pouvez uniquement signer celles que vous avez rédigées).'
+              : !canAuthorRole
+                ? isSignedAny
+                  ? 'Consultation en lecture seule · Cette page a reçu une signature authentifiée et est définitivement verrouillée.'
+                  : 'Consultation en lecture seule (accès temporaire sur ce dossier uniquement).'
+                : 'Cette page a reçu au moins une signature authentifiée et est définitivement verrouillée en modification.'}
           </span>
         </div>
       )}
@@ -901,6 +950,30 @@ export function JournalEditorView({
                     />
                   </div>
                 </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wide text-slate-500 mb-1">
+                  Préposé à la surveillance (ce jour)
+                </label>
+                <input
+                  type="text"
+                  lang="fr"
+                  disabled={readOnly}
+                  value={
+                    journal.preposeSurveillance ??
+                    chantier.preposeSurveillance ??
+                    ''
+                  }
+                  onChange={(e) =>
+                    updateField('preposeSurveillance', e.target.value)
+                  }
+                  placeholder={
+                    chantier.preposeSurveillance ||
+                    'Nom du préposé / rédacteur pour cette journée'
+                  }
+                  className="w-full min-h-[40px] px-3 rounded-xl border border-slate-200 bg-white text-sm font-medium text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-[#0a5b9c] disabled:bg-slate-50 disabled:text-slate-600"
+                />
               </div>
 
               {/* Mobile compact Temperatures row */}
@@ -1397,6 +1470,7 @@ export function JournalEditorView({
                   </div>
                   <div className="text-sm font-bold text-slate-900">
                     {journal.signatureControleur?.signerName ||
+                      journal.preposeSurveillance ||
                       chantier.preposeSurveillance ||
                       'Non défini'}
                   </div>
@@ -1615,7 +1689,7 @@ export function JournalEditorView({
 
       {/* Compact Mobile Sticky Bottom Action Bar */}
       <div className="lg:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/95 backdrop-blur-md border-t border-slate-200 px-3 py-2 flex items-center gap-2">
-        {isOwner && !isSignedAny && (
+        {(canMarkCompleted || canReopenToInProgress) && (
           <button
             type="button"
             onClick={() =>
@@ -1642,7 +1716,7 @@ export function JournalEditorView({
           </button>
         )}
 
-        {isOwner && (
+        {canAuthorRole && (
           <>
             <button
               type="button"

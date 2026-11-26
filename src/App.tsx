@@ -1,7 +1,7 @@
 import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import { LogOut, Shield, UserCircle2 } from 'lucide-react';
+import { Check, LogOut, PauseCircle, Shield, UserCircle2 } from 'lucide-react';
 import { A4JournalSheet } from './components/A4JournalSheet';
 import { AccessAdminView } from './components/AccessAdminView';
 import {
@@ -22,7 +22,10 @@ import { PdfProgressModal } from './components/PdfProgressModal';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { ShareAccessModal } from './components/ShareAccessModal';
 import { SignatureModal } from './components/SignatureModal';
-import { StandbyResumeModal } from './components/StandbyResumeModal';
+import {
+  StandbyResumeModal,
+  type DraftStandbyOrJcPeriod,
+} from './components/StandbyResumeModal';
 import { Toast, type ToastState } from './components/Toast';
 import { auth, isAdminEmail } from './firebase';
 import {
@@ -38,6 +41,8 @@ import {
   buildDailyFilename,
   buildWeeklyFilename,
   fmtDateFR,
+  fmtDateJJMMAA,
+  getChantierDisplayTitle,
   todayISO,
 } from './utils/dates';
 import {
@@ -59,7 +64,10 @@ import {
   signJournalPageCloud,
 } from './utils/firestoreService';
 import { generateAndDeliverPdf, type PdfProgress } from './utils/pdfExport';
-import { formatStandbyLine } from './utils/jdtStatus';
+import {
+  computeChantierJdtSummary,
+  formatPeriodRecapLine,
+} from './utils/jdtStatus';
 import { exportShareableHTML } from './utils/shareHtml';
 import {
   formatSignatureMethodLabel,
@@ -80,6 +88,25 @@ type ViewMode = 'chantiers' | 'chantier' | 'journal' | 'compte' | 'acces';
 
 function isGoogleAccount(u: User): boolean {
   return u.providerData.some((p) => p.providerId === 'google.com');
+}
+
+function isUserDelegateOnChantier(
+  ch: Chantier | null | undefined,
+  email?: string | null
+): boolean {
+  const cleanEmail = (email || '').trim().toLowerCase();
+  if (!ch || !cleanEmail) return false;
+  return (ch.delegateEmails || []).some(
+    (e) => e.trim().toLowerCase() === cleanEmail
+  );
+}
+
+function canAuthorOnChantier(
+  ch: Chantier | null | undefined,
+  u: User | null | undefined
+): boolean {
+  if (!ch || !u) return false;
+  return ch.ownerId === u.uid || isUserDelegateOnChantier(ch, u.email);
 }
 
 function formatActionError(err: unknown, fallback: string): string {
@@ -142,8 +169,10 @@ export default function App() {
   const [chantierModalOpen, setChantierModalOpen] = useState(false);
   const [editingChantier, setEditingChantier] = useState<Chantier | null>(null);
   const [shareAccessModalOpen, setShareAccessModalOpen] = useState(false);
-  const [standbyModalChantier, setStandbyModalChantier] =
-    useState<Chantier | null>(null);
+  const [standbyModalState, setStandbyModalState] = useState<{
+    chantier: Chantier;
+    initialKind: 'standby' | 'jc';
+  } | null>(null);
 
   // Single-verification signing session & modal state
   const [signingSession, setSigningSession] =
@@ -769,6 +798,45 @@ export default function App() {
     return others[0] || null;
   }, [chantierJournals, currentJournal]);
 
+  const activeChantierTabs = useMemo(() => {
+    const today = todayISO();
+    const list = chantiers
+      .filter((ch) => ch.jdtStatus !== 'archived')
+      .map((ch) => ({
+        chantier: ch,
+        summary: computeChantierJdtSummary(
+          ch,
+          journalsByChantierId[ch.id] || [],
+          today
+        ),
+      }));
+    list.sort((a, b) => {
+      const rank = (s: typeof a.summary) =>
+        s.effectiveStatus === 'standby'
+          ? 3
+          : s.remainingToValidateCount > 0
+            ? 0
+            : s.hasOpenJdt
+              ? 1
+              : 2;
+      const rA = rank(a.summary);
+      const rB = rank(b.summary);
+      if (rA !== rB) return rA - rB;
+      if (
+        rA === 0 &&
+        b.summary.remainingToValidateCount !== a.summary.remainingToValidateCount
+      ) {
+        return (
+          b.summary.remainingToValidateCount - a.summary.remainingToValidateCount
+        );
+      }
+      return getChantierDisplayTitle(a.chantier).localeCompare(
+        getChantierDisplayTitle(b.chantier)
+      );
+    });
+    return list;
+  }, [chantiers, journalsByChantierId]);
+
   const firmSuggestions = useMemo(() => {
     const set = new Set<string>();
     if (currentChantier?.entrepriseNom) set.add(currentChantier.entrepriseNom);
@@ -955,6 +1023,22 @@ export default function App() {
     [currentChantierId]
   );
 
+  const resolveDayPrepose = useCallback(
+    (chantier: Chantier, targetUser: User): string => {
+      if (chantier.ownerId === targetUser.uid) {
+        return chantier.preposeSurveillance || profile?.defaultPrepose || '';
+      }
+      return (
+        chantier.delegateName?.trim() ||
+        profile?.displayName ||
+        targetUser.displayName ||
+        targetUser.email?.split('@')[0] ||
+        ''
+      );
+    },
+    [profile]
+  );
+
   const buildBlankJournalForChantier = useCallback(
     (
       chantier: Chantier,
@@ -962,13 +1046,22 @@ export default function App() {
       journalNum: number,
       date: string,
       prevJournal?: Journal | null,
-      options?: { emptyOuvriers?: boolean; travaux?: string[]; status?: 'in_progress' | 'completed' }
+      options?: {
+        emptyOuvriers?: boolean;
+        travaux?: string[];
+        status?: 'in_progress' | 'completed';
+        specialType?: 'standby' | 'jc' | '';
+        periodStart?: string;
+        periodEnd?: string;
+      }
     ): Journal => ({
       id: uid(),
       chantierId: chantier.id,
       chantierOwnerId: chantier.ownerId || targetUser.uid,
       chantierReaderIds: chantier.readerIds || [],
       chantierReaderEmails: chantier.readerEmails || [],
+      chantierDelegateEmails: chantier.delegateEmails || [],
+      preposeSurveillance: resolveDayPrepose(chantier, targetUser),
       authorId: targetUser.uid,
       authorName:
         profile?.displayName ||
@@ -976,6 +1069,9 @@ export default function App() {
         targetUser.email?.split('@')[0] ||
         'Utilisateur',
       status: options?.status || 'in_progress',
+      specialType: options?.specialType || '',
+      periodStart: options?.periodStart || '',
+      periodEnd: options?.periodEnd || '',
       journalNum,
       date,
       horaireDebut:
@@ -1003,7 +1099,7 @@ export default function App() {
       signatureControleur: null,
       signatureLecteur: null,
     }),
-    [profile]
+    [profile, resolveDayPrepose]
   );
 
   const handleOpenTodayJournal = async (ch: Chantier) => {
@@ -1037,7 +1133,7 @@ export default function App() {
       return;
     }
 
-    if (ch.ownerId !== user.uid || ch.jdtStatus === 'archived') {
+    if (!canAuthorOnChantier(ch, user) || ch.jdtStatus === 'archived') {
       setChantierJournals(sortedAsc);
       setView('chantier');
       return;
@@ -1095,7 +1191,7 @@ export default function App() {
       );
       updateChantierInState(saved);
       notify(
-        `Chantier « ${saved.numero || saved.projet} » mis en stand-by (staté).`,
+        `Chantier « ${getChantierDisplayTitle(saved)} » mis en stand-by (staté).`,
         'success'
       );
     } catch (err) {
@@ -1106,10 +1202,36 @@ export default function App() {
     }
   };
 
+  const handleCancelStandby = async (ch: Chantier) => {
+    if (!user || ch.ownerId !== user.uid) return;
+    try {
+      const saved = await saveChantierCloud(
+        {
+          ...ch,
+          jdtStatus: 'active',
+          standbySince: '',
+        },
+        user
+      );
+      updateChantierInState(saved);
+      setStandbyModalState(null);
+      notify(
+        `Statage annulé pour « ${getChantierDisplayTitle(saved)} » : retour à l’état actif sans période enregistrée.`,
+        'success'
+      );
+    } catch (err) {
+      notify(
+        formatActionError(err, 'Impossible d’annuler le statage.'),
+        'error'
+      );
+      throw err;
+    }
+  };
+
   const handleConfirmStandbyResume = async (
     ch: Chantier,
     params: {
-      periods: { id: string; startDate: string; endDate: string; note: string }[];
+      periods: DraftStandbyOrJcPeriod[];
       resumeDate: string;
       openResumeJournal: boolean;
     }
@@ -1140,9 +1262,10 @@ export default function App() {
     );
 
     for (const period of sortedPeriods) {
-      const line = formatStandbyLine(
+      const line = formatPeriodRecapLine(
         period.startDate,
         period.endDate,
+        period.kind,
         period.note
       );
       const existingUnsigned = working.find(
@@ -1160,14 +1283,46 @@ export default function App() {
         const updatedJournal: Journal = {
           ...existingUnsigned,
           status: 'completed',
+          specialType: period.kind,
+          periodStart: period.startDate,
+          periodEnd: period.endDate,
+          ouvriers: cleanTravaux.length === 0 ? [] : existingUnsigned.ouvriers,
           travaux: alreadyHasLine ? cleanTravaux : [...cleanTravaux, line],
         };
-        await saveJournalCloud(updatedJournal, ch, user);
-        const idx = working.findIndex((j) => j.id === existingUnsigned.id);
-        if (idx >= 0) working[idx] = updatedJournal;
+        try {
+          await saveJournalCloud(updatedJournal, ch, user);
+          const idx = working.findIndex((j) => j.id === existingUnsigned.id);
+          if (idx >= 0) working[idx] = updatedJournal;
+        } catch (err) {
+          if (
+            err instanceof Error &&
+            err.message.includes('déjà été signée par un membre')
+          ) {
+            maxNum += 1;
+            const periodJournal = buildBlankJournalForChantier(
+              ch,
+              user,
+              maxNum,
+              period.startDate,
+              latestPrev,
+              {
+                emptyOuvriers: true,
+                travaux: [line],
+                status: 'completed',
+                specialType: period.kind,
+                periodStart: period.startDate,
+                periodEnd: period.endDate,
+              }
+            );
+            await saveJournalCloud(periodJournal, ch, user);
+            working.push(periodJournal);
+          } else {
+            throw err;
+          }
+        }
       } else {
         maxNum += 1;
-        const standbyJournal = buildBlankJournalForChantier(
+        const periodJournal = buildBlankJournalForChantier(
           ch,
           user,
           maxNum,
@@ -1177,39 +1332,49 @@ export default function App() {
             emptyOuvriers: true,
             travaux: [line],
             status: 'completed',
+            specialType: period.kind,
+            periodStart: period.startDate,
+            periodEnd: period.endDate,
           }
         );
-        await saveJournalCloud(standbyJournal, ch, user);
-        working.push(standbyJournal);
+        await saveJournalCloud(periodJournal, ch, user);
+        working.push(periodJournal);
       }
     }
 
-    let resumeJournal = working.find((j) => j.date === params.resumeDate) || null;
-    if (!resumeJournal) {
-      maxNum += 1;
-      resumeJournal = buildBlankJournalForChantier(
-        ch,
-        user,
-        maxNum,
-        params.resumeDate,
-        latestPrev,
-        {
-          emptyOuvriers: false,
-          travaux: [],
-          status: 'in_progress',
-        }
-      );
-      await saveJournalCloud(resumeJournal, ch, user);
-      working.push(resumeJournal);
+    const shouldCreateResume =
+      params.openResumeJournal || ch.jdtStatus === 'standby';
+    let resumeJournal: Journal | null = null;
+    if (shouldCreateResume && params.resumeDate) {
+      resumeJournal =
+        working.find((j) => j.date === params.resumeDate) || null;
+      if (!resumeJournal) {
+        maxNum += 1;
+        resumeJournal = buildBlankJournalForChantier(
+          ch,
+          user,
+          maxNum,
+          params.resumeDate,
+          latestPrev,
+          {
+            emptyOuvriers: false,
+            travaux: [],
+            status: 'in_progress',
+          }
+        );
+        await saveJournalCloud(resumeJournal, ch, user);
+        working.push(resumeJournal);
+      }
     }
 
     const updatedPeriods = [
       ...(ch.standbyPeriods || []),
       ...sortedPeriods.map((p) => ({
         id: p.id,
+        kind: p.kind,
         startDate: p.startDate,
         endDate: p.endDate,
-        resumeDate: params.resumeDate,
+        resumeDate: shouldCreateResume ? params.resumeDate : '',
         note: p.note.trim() || undefined,
       })),
     ];
@@ -1237,11 +1402,21 @@ export default function App() {
       setChantierJournals(finalSorted);
     }
 
-    setStandbyModalChantier(null);
-    notify(
-      `Statage enregistré et suivi repris au ${fmtDateFR(params.resumeDate)} (Journal N° ${resumeJournal.journalNum}).`,
-      'success'
-    );
+    setStandbyModalState(null);
+    const hasJcOnly = sortedPeriods.every((p) => p.kind === 'jc');
+    if (hasJcOnly && !resumeJournal) {
+      notify(
+        `Congé Entreprise (JC) enregistré en 1 page récapitulative (${fmtDateJJMMAA(sortedPeriods[0]?.startDate)}).`,
+        'success'
+      );
+    } else if (resumeJournal) {
+      notify(
+        `${hasJcOnly ? 'Congés (JC)' : 'Statage'} enregistré en 1 page · reprise au ${fmtDateJJMMAA(params.resumeDate)}.`,
+        'success'
+      );
+    } else {
+      notify('Période enregistrée en 1 page récapitulative.', 'success');
+    }
 
     if (params.openResumeJournal && resumeJournal) {
       setCurrentChantierId(ch.id);
@@ -1306,7 +1481,7 @@ export default function App() {
 
   const handleNewJournal = async () => {
     if (!currentChantier || !user) return;
-    if (currentChantier.ownerId !== user.uid) return;
+    if (!canAuthorOnChantier(currentChantier, user)) return;
 
     const sorted = [...chantierJournals].sort(
       (a, b) =>
@@ -1338,7 +1513,7 @@ export default function App() {
 
   const handleDuplicateJournal = async (source: Journal) => {
     if (!currentChantier || !user) return;
-    if (currentChantier.ownerId !== user.uid) return;
+    if (!canAuthorOnChantier(currentChantier, user)) return;
 
     const maxNum = chantierJournals.reduce(
       (m, j) => Math.max(m, j.journalNum || 0),
@@ -1351,6 +1526,8 @@ export default function App() {
       chantierOwnerId: currentChantier.ownerId || user.uid,
       chantierReaderIds: currentChantier.readerIds || [],
       chantierReaderEmails: currentChantier.readerEmails || [],
+      chantierDelegateEmails: currentChantier.delegateEmails || [],
+      preposeSurveillance: resolveDayPrepose(currentChantier, user),
       authorId: user.uid,
       authorName:
         profile?.displayName ||
@@ -1358,6 +1535,9 @@ export default function App() {
         user.email?.split('@')[0] ||
         'Utilisateur',
       status: 'in_progress',
+      specialType: '',
+      periodStart: '',
+      periodEnd: '',
       journalNum: maxNum + 1,
       date: todayISO(),
       ouvriers: source.ouvriers.map((o) => ({ ...o })),
@@ -1426,15 +1606,34 @@ export default function App() {
 
   const handleUpdateJournal = (updated: Journal) => {
     if (!currentChantier || !user) return;
-    if (currentChantier.ownerId !== user.uid) return;
+    const isOwner = currentChantier.ownerId === user.uid;
+    const isDelegate = !isOwner && isUserDelegateOnChantier(currentChantier, user.email);
+    if (!isOwner && !isDelegate) return;
+    if (isDelegate && updated.status === 'completed') return;
     if (updated.signatureControleur || updated.signatureLecteur) return;
 
-    setEditingJournalDraft(updated);
+    const prepared: Journal = isDelegate
+      ? {
+          ...updated,
+          authorId: user.uid,
+          authorName:
+            profile?.displayName ||
+            user.displayName ||
+            user.email?.split('@')[0] ||
+            updated.authorName ||
+            'Rédacteur',
+          preposeSurveillance:
+            updated.preposeSurveillance ||
+            resolveDayPrepose(currentChantier, user),
+        }
+      : updated;
+
+    setEditingJournalDraft(prepared);
     updateJournalsAndCache(currentChantier.id, (prev) =>
-      prev.map((item) => (item.id === updated.id ? updated : item))
+      prev.map((item) => (item.id === prepared.id ? prepared : item))
     );
     pendingSaveRef.current = {
-      journal: updated,
+      journal: prepared,
       chantier: currentChantier,
       user,
     };
@@ -1450,12 +1649,35 @@ export default function App() {
     nextStatus: 'in_progress' | 'completed'
   ) => {
     if (!currentChantier || !currentJournal || !user) return;
-    if (currentChantier.ownerId !== user.uid) return;
+    const isOwner = currentChantier.ownerId === user.uid;
+    const isDelegate = !isOwner && isUserDelegateOnChantier(currentChantier, user.email);
+    if (!isOwner && !isDelegate) return;
+    if (isDelegate && (currentJournal.status === 'completed' || nextStatus !== 'completed')) {
+      return;
+    }
     if (currentJournal.signatureControleur || currentJournal.signatureLecteur) {
       return;
     }
 
-    const updated: Journal = { ...currentJournal, status: nextStatus };
+    const previousJournalState = currentJournal;
+    const updated: Journal = {
+      ...currentJournal,
+      status: nextStatus,
+      ...(isDelegate
+        ? {
+            authorId: user.uid,
+            authorName:
+              profile?.displayName ||
+              user.displayName ||
+              user.email?.split('@')[0] ||
+              currentJournal.authorName ||
+              'Rédacteur',
+            preposeSurveillance:
+              currentJournal.preposeSurveillance ||
+              resolveDayPrepose(currentChantier, user),
+          }
+        : {}),
+    };
     setEditingJournalDraft(updated);
     pendingSaveRef.current = null;
     if (saveTimerRef.current) {
@@ -1470,11 +1692,20 @@ export default function App() {
       );
       notify(
         nextStatus === 'completed'
-          ? `Journal N° ${updated.journalNum} marqué comme terminé.`
-          : `Journal N° ${updated.journalNum} repassé en cours.`,
+          ? `Page du ${fmtDateJJMMAA(updated.date)} marquée comme terminée.`
+          : `Page du ${fmtDateJJMMAA(updated.date)} repassée en cours.`,
         'success'
       );
     } catch (err) {
+      setEditingJournalDraft(previousJournalState);
+      if (
+        err instanceof Error &&
+        err.message.includes('déjà été signée par un membre')
+      ) {
+        notify(err.message, 'error');
+        void refreshJournalsFromCloud(currentChantier, user, true);
+        return;
+      }
       notify(
         formatActionError(
           err,
@@ -1496,6 +1727,8 @@ export default function App() {
       if (!currentChantier) return;
       await flushPendingJournalSave();
 
+      const isOwner = currentChantier.ownerId === user?.uid;
+
       for (let i = 0; i < journalsToSign.length; i += 1) {
         const j = journalsToSign[i];
         if (j.status !== 'completed') {
@@ -1505,37 +1738,48 @@ export default function App() {
         }
         onProgress?.(i + 1, journalsToSign.length, j);
 
+        const effectiveJournal: Journal =
+          role === 'controleur' && !isOwner
+            ? {
+                ...j,
+                preposeSurveillance: session.signerName || j.preposeSurveillance,
+              }
+            : j;
+
         const sigRecord = await signJournalPageWithSession(
           session,
           role,
           currentChantier,
-          j
+          effectiveJournal
         );
         await signJournalPageCloud(
           currentChantier.id,
-          j.id,
+          effectiveJournal.id,
           role,
           sigRecord,
           currentChantier,
-          j,
+          effectiveJournal,
           user
         );
 
         updateJournalsAndCache(currentChantier.id, (prev) =>
           prev.map((item) =>
-            item.id !== j.id
+            item.id !== effectiveJournal.id
               ? item
               : role === 'controleur'
-                ? { ...item, signatureControleur: sigRecord }
-                : { ...item, signatureLecteur: sigRecord }
+                ? {
+                    ...effectiveJournal,
+                    signatureControleur: sigRecord,
+                  }
+                : { ...effectiveJournal, signatureLecteur: sigRecord }
           )
         );
 
         setEditingJournalDraft((prev) => {
-          if (!prev || prev.id !== j.id) return prev;
+          if (!prev || prev.id !== effectiveJournal.id) return prev;
           return role === 'controleur'
-            ? { ...prev, signatureControleur: sigRecord }
-            : { ...prev, signatureLecteur: sigRecord };
+            ? { ...effectiveJournal, signatureControleur: sigRecord }
+            : { ...effectiveJournal, signatureLecteur: sigRecord };
         });
       }
 
@@ -1869,7 +2113,7 @@ export default function App() {
       <div id="app-shell" className="min-h-screen flex flex-col bg-[#f4f6f9]">
         {/* Header */}
         <header className="sticky top-0 z-30 bg-[#0a5b9c] text-white border-b border-[#063f6e] shadow-xs">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-3">
+          <div className="max-w-[1440px] mx-auto px-4 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-3">
             <button
               type="button"
               onClick={async () => {
@@ -1967,16 +2211,81 @@ export default function App() {
               </button>
             </div>
           </div>
+
+          {/* Persistent Top Tabs Bar for All Active Chantiers */}
+          {activeChantierTabs.length > 0 && (
+            <div className="bg-[#063f6e]/70 border-t border-white/10">
+              <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-1.5 flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+                {activeChantierTabs.map(({ chantier: tabCh, summary: tabSummary }) => {
+                  const isActiveTab =
+                    currentChantierId === tabCh.id &&
+                    (view === 'chantier' || view === 'journal');
+                  const tabTitle = getChantierDisplayTitle(tabCh);
+                  const isStandby = tabSummary.effectiveStatus === 'standby';
+
+                  return (
+                    <button
+                      key={tabCh.id}
+                      type="button"
+                      onClick={async () => {
+                        await flushPendingJournalSave();
+                        setCurrentChantierId(tabCh.id);
+                        setCurrentJournalId(null);
+                        setView('chantier');
+                        window.scrollTo({
+                          top: 0,
+                          behavior: 'instant' as ScrollBehavior,
+                        });
+                      }}
+                      title={`${tabCh.numero ? `${tabCh.numero} — ` : ''}${tabCh.projet || tabTitle}`}
+                      className={`min-h-[32px] px-3 rounded-lg text-xs font-bold whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer transition-colors ${
+                        isActiveTab
+                          ? 'bg-white text-[#0a5b9c] shadow-xs'
+                          : 'bg-white/10 hover:bg-white/20 text-white/95'
+                      }`}
+                    >
+                      <span className="max-w-[180px] truncate">{tabTitle}</span>
+                      {isStandby ? (
+                        <PauseCircle
+                          className={`w-3.5 h-3.5 shrink-0 ${
+                            isActiveTab ? 'text-amber-600' : 'text-amber-300'
+                          }`}
+                        />
+                      ) : tabSummary.todayCompleted &&
+                        tabSummary.remainingToValidateCount === 0 ? (
+                        <Check
+                          className={`w-3.5 h-3.5 shrink-0 stroke-[3] ${
+                            isActiveTab ? 'text-emerald-600' : 'text-emerald-300'
+                          }`}
+                        />
+                      ) : tabSummary.remainingToValidateCount > 0 ? (
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-black tabular-nums leading-none ${
+                            isActiveTab
+                              ? 'bg-amber-100 text-amber-900'
+                              : 'bg-amber-400 text-amber-950'
+                          }`}
+                        >
+                          {tabSummary.remainingToValidateCount}
+                        </span>
+                      ) : null}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </header>
 
         {/* Main Workspace */}
-        <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 py-5 sm:py-7">
+        <main className="flex-1 w-full max-w-[1440px] mx-auto px-4 sm:px-6 py-5 sm:py-7">
           {view === 'chantiers' && (
             <ChantiersView
               chantiers={chantiers}
               journalsByChantierId={journalsByChantierId}
               shareByChantierId={shareByChantierId}
               currentUserId={user.uid}
+              currentUserEmail={user.email || ''}
               isColleagueOrAdmin={isColleagueOrAdmin}
               lastBackupIso={lastBackupIso}
               localMigrationCount={unmigratedLocalCount}
@@ -1989,7 +2298,12 @@ export default function App() {
               }}
               onOpenTodayJournal={(ch) => void handleOpenTodayJournal(ch)}
               onPutChantierStandby={(ch) => void handlePutChantierStandby(ch)}
-              onOpenResumeModal={(ch) => setStandbyModalChantier(ch)}
+              onOpenResumeModal={(ch) =>
+                setStandbyModalState({ chantier: ch, initialKind: 'standby' })
+              }
+              onOpenJcModal={(ch) =>
+                setStandbyModalState({ chantier: ch, initialKind: 'jc' })
+              }
               onArchiveChantier={handleArchiveChantier}
               onReopenChantier={(ch) => void handleReopenChantier(ch)}
               onNewChantier={() => {
@@ -2016,6 +2330,7 @@ export default function App() {
               journals={chantierJournals}
               shareInfo={shareByChantierId[currentChantier.id] || null}
               currentUserId={user.uid}
+              currentUserEmail={user.email || ''}
               signingSession={signingSession}
               onResetSigningSession={() => {
                 setSigningSession(null);
@@ -2050,7 +2365,18 @@ export default function App() {
               onDuplicateJournal={handleDuplicateJournal}
               onDeleteJournal={handleDeleteJournal}
               onPutStandby={() => void handlePutChantierStandby(currentChantier)}
-              onOpenResumeModal={() => setStandbyModalChantier(currentChantier)}
+              onOpenResumeModal={() =>
+                setStandbyModalState({
+                  chantier: currentChantier,
+                  initialKind: 'standby',
+                })
+              }
+              onOpenJcModal={() =>
+                setStandbyModalState({
+                  chantier: currentChantier,
+                  initialKind: 'jc',
+                })
+              }
               onArchiveChantier={() => handleArchiveChantier(currentChantier)}
               onReopenChantier={() => void handleReopenChantier(currentChantier)}
               onSignJournals={(list, role, label) => {
@@ -2071,19 +2397,28 @@ export default function App() {
             <JournalEditorView
               chantier={currentChantier}
               journal={currentJournal}
+              allJournals={chantierJournals}
               previousJournal={previousJournal}
               isOwner={currentChantier.ownerId === user.uid}
+              isDelegate={
+                currentChantier.ownerId !== user.uid &&
+                isUserDelegateOnChantier(currentChantier, user.email)
+              }
+              currentUserId={user.uid}
               firmSuggestions={firmSuggestions}
               travauxSuggestions={travauxSuggestions}
+              onSelectJournal={async (jId) => {
+                await flushPendingJournalSave();
+                setCurrentJournalId(jId);
+                window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+              }}
               onChange={handleUpdateJournal}
               onToggleStatus={handleToggleJournalStatus}
               onSignPage={(role) => {
                 void handleRequestSignJournals(
                   [currentJournal],
                   role,
-                  `Journal N° ${currentJournal.journalNum} (${fmtDateFR(
-                    currentJournal.date
-                  )})`
+                  `${fmtDateJJMMAA(currentJournal.date)} (N° ${currentJournal.journalNum})`
                 );
               }}
               onBack={async () => {
@@ -2163,7 +2498,13 @@ export default function App() {
           role={signModalState.role}
           chantier={currentChantier}
           defaultSignerName={
-            effectiveProfile.defaultPrepose || effectiveProfile.displayName
+            signModalState.role === 'controleur' &&
+            currentChantier.ownerId !== user.uid
+              ? currentChantier.delegateName?.trim() ||
+                effectiveProfile.displayName ||
+                user.displayName ||
+                ''
+              : effectiveProfile.defaultPrepose || effectiveProfile.displayName
           }
           signerEmail={user.email || ''}
           signerUid={user.uid}
@@ -2185,13 +2526,22 @@ export default function App() {
       )}
 
       <StandbyResumeModal
-        open={Boolean(standbyModalChantier)}
-        chantier={standbyModalChantier}
-        onClose={() => setStandbyModalChantier(null)}
+        open={Boolean(standbyModalState)}
+        chantier={standbyModalState?.chantier || null}
+        initialKind={standbyModalState?.initialKind || 'standby'}
+        onClose={() => setStandbyModalState(null)}
         onConfirm={async (params) => {
-          if (!standbyModalChantier) return;
-          await handleConfirmStandbyResume(standbyModalChantier, params);
+          if (!standbyModalState) return;
+          await handleConfirmStandbyResume(standbyModalState.chantier, params);
         }}
+        onCancelStandby={
+          standbyModalState?.chantier.jdtStatus === 'standby'
+            ? async () => {
+                if (!standbyModalState) return;
+                await handleCancelStandby(standbyModalState.chantier);
+              }
+            : undefined
+        }
       />
 
       <ConfirmModal

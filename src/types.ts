@@ -84,6 +84,9 @@ export interface Journal {
   authorId?: string;
   authorName?: string;
   status?: JournalStatus;
+  specialType?: 'standby' | 'jc' | '';
+  periodStart?: string;
+  periodEnd?: string;
   journalNum: number;
   date: string; // YYYY-MM-DD
   horaireDebut: string;
@@ -117,6 +120,7 @@ export type ChantierJdtStatus = 'active' | 'standby' | 'archived';
 
 export interface StandbyPeriod {
   id: string;
+  kind?: 'standby' | 'jc';
   startDate: string; // YYYY-MM-DD
   endDate: string; // YYYY-MM-DD
   resumeDate: string; // YYYY-MM-DD
@@ -133,6 +137,7 @@ export interface Chantier {
   delegateEmails?: string[];
   delegateName?: string;
   readerAccessCode?: string;
+  pseudo?: string;
   numero: string;
   projet: string;
   entrepriseNom: string;

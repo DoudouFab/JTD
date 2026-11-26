@@ -28,8 +28,9 @@ service cloud.firestore {
     // Sole Administrator (Fabien Pirquin: Gmail or INASEP verified)
     function isAdmin() {
       return isSignedIn()
-        && request.auth.token.email_verified == true
         && request.auth.token.email is string
+        && (request.auth.token.email_verified == true
+            || request.auth.token.firebase.sign_in_provider == 'google.com')
         && (request.auth.token.email.lower() == 'pirquinfabien@gmail.com'
             || request.auth.token.email.lower() == 'fabien.pirquin@inasep.be');
     }
@@ -190,7 +191,7 @@ service cloud.firestore {
       ])
       && data.keys().hasOnly([
         'id', 'ownerId', 'ownerName', 'visibility', 'readerIds', 'readerEmails',
-        'readerAccessCode', 'delegateEmails', 'delegateName',
+        'readerAccessCode', 'delegateEmails', 'delegateName', 'pseudo',
         'numero', 'projet', 'entrepriseNom', 'entrepriseAdresse',
         'references', 'adresseChantier', 'horaireDebut', 'horaireFin',
         'preposeSurveillance', 'postes', 'journalIds',
@@ -206,6 +207,7 @@ service cloud.firestore {
       && (!('readerAccessCode' in data) || (data.readerAccessCode is string && data.readerAccessCode.size() <= 16 && data.readerAccessCode.matches('^$|^[0-9]{6}$')))
       && (!('delegateEmails' in data) || isStringListBounded(data.delegateEmails, 3))
       && (!('delegateName' in data) || isStringBounded(data.delegateName, 150))
+      && (!('pseudo' in data) || isStringBounded(data.pseudo, 80))
       && (!('journalIds' in data) || isStringListBounded(data.journalIds, 1000))
       && (!('jdtStatus' in data) || data.jdtStatus in ['active', 'standby', 'archived'])
       && (!('standbySince' in data) || isStringBounded(data.standbySince, 20))
@@ -234,7 +236,8 @@ service cloud.firestore {
       ])
       && data.keys().hasOnly([
         'id', 'chantierId', 'chantierOwnerId', 'chantierReaderIds', 'chantierReaderEmails',
-        'chantierDelegateEmails', 'authorId', 'authorName', 'preposeSurveillance', 'status', 'journalNum',
+        'chantierDelegateEmails', 'authorId', 'authorName', 'preposeSurveillance', 'status',
+        'specialType', 'periodStart', 'periodEnd', 'journalNum',
         'date', 'horaireDebut', 'horaireFin', 'tempMatin', 'tempApresMidi',
         'etatAtmo', 'ouvriers', 'travaux', 'materiel', 'materiaux',
         'essais', 'evenements', 'decisions', 'visites', 'sigEntrepreneur',
@@ -250,6 +253,9 @@ service cloud.firestore {
       && (!('authorName' in data) || isStringBounded(data.authorName, 120))
       && (!('preposeSurveillance' in data) || isStringBounded(data.preposeSurveillance, 150))
       && (!('status' in data) || data.status in ['in_progress', 'completed'])
+      && (!('specialType' in data) || data.specialType in ['', 'standby', 'jc'])
+      && (!('periodStart' in data) || isStringBounded(data.periodStart, 20))
+      && (!('periodEnd' in data) || isStringBounded(data.periodEnd, 20))
       && data.journalNum is number && data.journalNum >= 1 && data.journalNum <= 99999
       && isStringBounded(data.date, 20)
       && isStringBounded(data.horaireDebut, 20)
@@ -752,18 +758,34 @@ service cloud.firestore {
       allow update: if isVerifiedUser()
         && isValidId(chantierId)
         && isValidChantier(incoming())
-        && incoming().id == existing().id
-        && incoming().ownerId == existing().ownerId
-        && incoming().createdAt == existing().createdAt
+        && incoming().id == chantierId
+        && (
+          incoming().ownerId == existing().ownerId
+          || (!('ownerId' in existing()) && incoming().ownerId == request.auth.uid)
+        )
+        && (
+          (('createdAt' in existing()) && (existing().createdAt is timestamp) && incoming().createdAt == existing().createdAt)
+          || ((!('createdAt' in existing()) || !(existing().createdAt is timestamp)) && incoming().createdAt == request.time)
+        )
         && incoming().updatedAt == request.time
         && (
           (isVerifiedActive()
             && existing().ownerId == request.auth.uid
-            && incoming().diff(existing()).affectedKeys().hasOnly([
+            && incoming().diff(existing()).addedKeys().hasOnly([
+              'id', 'ownerId', 'ownerName', 'visibility',
               'readerIds', 'readerEmails', 'readerAccessCode', 'delegateEmails', 'delegateName',
-              'journalIds', 'numero', 'projet', 'entrepriseNom', 'entrepriseAdresse',
+              'journalIds', 'pseudo', 'numero', 'projet', 'entrepriseNom', 'entrepriseAdresse',
               'references', 'adresseChantier', 'horaireDebut', 'horaireFin',
-              'preposeSurveillance', 'postes', 'jdtStatus', 'standbySince', 'closedAt', 'standbyPeriods', 'updatedAt'
+              'preposeSurveillance', 'postes', 'jdtStatus', 'standbySince', 'closedAt', 'standbyPeriods',
+              'createdAt', 'updatedAt'
+            ])
+            && incoming().diff(existing()).changedKeys().hasOnly([
+              'id', 'ownerId', 'ownerName', 'visibility',
+              'readerIds', 'readerEmails', 'readerAccessCode', 'delegateEmails', 'delegateName',
+              'journalIds', 'pseudo', 'numero', 'projet', 'entrepriseNom', 'entrepriseAdresse',
+              'references', 'adresseChantier', 'horaireDebut', 'horaireFin',
+              'preposeSurveillance', 'postes', 'jdtStatus', 'standbySince', 'closedAt', 'standbyPeriods',
+              'createdAt', 'updatedAt'
             ]))
           || (hasActiveShare(chantierId)
               && incoming().readerIds.hasAll(existing().readerIds)
@@ -857,7 +879,7 @@ service cloud.firestore {
               && (!('signatureLecteur' in incoming()) || incoming().signatureLecteur == null)
               && incoming().diff(existing()).addedKeys().hasOnly([
                 'id', 'chantierId', 'chantierOwnerId',
-                'status', 'journalNum', 'date', 'horaireDebut', 'horaireFin',
+                'status', 'specialType', 'periodStart', 'periodEnd', 'journalNum', 'date', 'horaireDebut', 'horaireFin',
                 'tempMatin', 'tempApresMidi', 'etatAtmo', 'ouvriers',
                 'travaux', 'materiel', 'materiaux', 'essais', 'evenements',
                 'decisions', 'visites', 'sigEntrepreneur', 'preposeSurveillance',
@@ -867,7 +889,7 @@ service cloud.firestore {
               ])
               && incoming().diff(existing()).changedKeys().hasOnly([
                 'id', 'chantierId', 'chantierOwnerId',
-                'status', 'journalNum', 'date', 'horaireDebut', 'horaireFin',
+                'status', 'specialType', 'periodStart', 'periodEnd', 'journalNum', 'date', 'horaireDebut', 'horaireFin',
                 'tempMatin', 'tempApresMidi', 'etatAtmo', 'ouvriers',
                 'travaux', 'materiel', 'materiaux', 'essais', 'evenements',
                 'decisions', 'visites', 'sigEntrepreneur', 'preposeSurveillance',
@@ -897,7 +919,7 @@ service cloud.firestore {
                       && (!('signatureLecteur' in incoming()) || incoming().signatureLecteur == null)
                       && incoming().diff(existing()).addedKeys().hasOnly([
                         'id', 'chantierId', 'chantierOwnerId',
-                        'status', 'journalNum', 'date', 'horaireDebut', 'horaireFin',
+                        'status', 'specialType', 'periodStart', 'periodEnd', 'journalNum', 'date', 'horaireDebut', 'horaireFin',
                         'tempMatin', 'tempApresMidi', 'etatAtmo', 'ouvriers',
                         'travaux', 'materiel', 'materiaux', 'essais', 'evenements',
                         'decisions', 'visites', 'sigEntrepreneur', 'preposeSurveillance',
@@ -907,7 +929,7 @@ service cloud.firestore {
                       ])
                       && incoming().diff(existing()).changedKeys().hasOnly([
                         'id', 'chantierId', 'chantierOwnerId',
-                        'status', 'journalNum', 'date', 'horaireDebut', 'horaireFin',
+                        'status', 'specialType', 'periodStart', 'periodEnd', 'journalNum', 'date', 'horaireDebut', 'horaireFin',
                         'tempMatin', 'tempApresMidi', 'etatAtmo', 'ouvriers',
                         'travaux', 'materiel', 'materiaux', 'essais', 'evenements',
                         'decisions', 'visites', 'sigEntrepreneur', 'preposeSurveillance',
@@ -924,7 +946,7 @@ service cloud.firestore {
                 && (!('signatureLecteur' in incoming()) || incoming().signatureLecteur == null)
                 && incoming().diff(existing()).addedKeys().hasOnly([
                   'id', 'chantierId', 'chantierOwnerId',
-                  'status', 'journalNum', 'date', 'horaireDebut', 'horaireFin',
+                  'status', 'specialType', 'periodStart', 'periodEnd', 'journalNum', 'date', 'horaireDebut', 'horaireFin',
                   'tempMatin', 'tempApresMidi', 'etatAtmo', 'ouvriers',
                   'travaux', 'materiel', 'materiaux', 'essais', 'evenements',
                   'decisions', 'visites', 'sigEntrepreneur', 'preposeSurveillance',
@@ -934,7 +956,7 @@ service cloud.firestore {
                 ])
                 && incoming().diff(existing()).changedKeys().hasOnly([
                   'id', 'chantierId', 'chantierOwnerId',
-                  'status', 'journalNum', 'date', 'horaireDebut', 'horaireFin',
+                  'status', 'specialType', 'periodStart', 'periodEnd', 'journalNum', 'date', 'horaireDebut', 'horaireFin',
                   'tempMatin', 'tempApresMidi', 'etatAtmo', 'ouvriers',
                   'travaux', 'materiel', 'materiaux', 'essais', 'evenements',
                   'decisions', 'visites', 'sigEntrepreneur', 'preposeSurveillance',

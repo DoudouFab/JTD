@@ -12,6 +12,32 @@ export function fmtDateFR(iso?: string): string {
   return `${d}/${m}/${y}`;
 }
 
+export function fmtDateJJMMAA(iso?: string): string {
+  if (!iso) return '—';
+  const [y, m, d] = iso.split('-');
+  if (!y || !m || !d) return iso;
+  return `${d}/${m}/${y.slice(-2)}`;
+}
+
+export function fmtDateJJMM(iso?: string): string {
+  if (!iso) return '—';
+  const [y, m, d] = iso.split('-');
+  if (!y || !m || !d) return iso;
+  return `${d}/${m}`;
+}
+
+export function getChantierDisplayTitle(
+  ch?: Pick<Chantier, 'pseudo' | 'projet' | 'numero'> | null
+): string {
+  if (!ch) return 'Projet sans titre';
+  const pseudo = (ch.pseudo || '').trim();
+  if (pseudo) return pseudo;
+  const projet = (ch.projet || '').trim();
+  if (projet) return projet;
+  const numero = (ch.numero || '').trim();
+  return numero || 'Projet sans titre';
+}
+
 export function fmtDateShortDash(iso?: string): string {
   if (!iso) return '';
   const [y, m, d] = iso.split('-');

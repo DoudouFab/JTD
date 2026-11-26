@@ -871,6 +871,7 @@ function sanitizeStandbyPeriods(val: unknown): StandbyPeriod[] {
     .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
     .map((item) => ({
       id: sanitizeDocId(String(item.id || uid())),
+      kind: (item.kind === 'jc' ? 'jc' : 'standby') as 'standby' | 'jc',
       startDate: clampStr(item.startDate, 20),
       endDate: clampStr(item.endDate, 20),
       resumeDate: clampStr(item.resumeDate, 20),
@@ -898,6 +899,7 @@ function sanitizeChantierPayload(
     (readerEmails.length > 0 || delegateEmails.length > 0
       ? generateDossierPinCode()
       : '');
+  const pseudo = clampStr(ch.pseudo || '', 80);
   const jdtStatus = normalizeChantierJdtStatus(ch.jdtStatus);
   const standbySince = clampStr(ch.standbySince || '', 20);
   const closedAt = clampStr(ch.closedAt || '', 20);
@@ -918,6 +920,7 @@ function sanitizeChantierPayload(
       1000,
       128
     ),
+    pseudo,
     numero: clampStr(ch.numero, 100),
     projet: clampStr(ch.projet, 250),
     entrepriseNom: clampStr(ch.entrepriseNom, 200),
@@ -968,6 +971,8 @@ function sanitizeJournalPayload(
 
   const status: JournalStatus =
     j.status === 'completed' ? 'completed' : 'in_progress';
+  const specialType: 'standby' | 'jc' | '' =
+    j.specialType === 'standby' || j.specialType === 'jc' ? j.specialType : '';
 
   return {
     id: sanitizeDocId(j.id),
@@ -980,6 +985,9 @@ function sanitizeJournalPayload(
     authorId,
     authorName: clampStr(authorName, 120),
     status,
+    specialType,
+    periodStart: clampStr(j.periodStart || '', 20),
+    periodEnd: clampStr(j.periodEnd || '', 20),
     journalNum: Math.max(1, Math.min(99999, Number(j.journalNum) || 1)),
     date: clampStr(j.date, 20),
     horaireDebut: clampStr(j.horaireDebut, 20),
@@ -1272,6 +1280,126 @@ async function syncDossierAccessGrant(
   }
 }
 
+const ALLOWED_CHANTIER_KEYS = new Set([
+  'id',
+  'ownerId',
+  'ownerName',
+  'visibility',
+  'readerIds',
+  'readerEmails',
+  'readerAccessCode',
+  'delegateEmails',
+  'delegateName',
+  'pseudo',
+  'numero',
+  'projet',
+  'entrepriseNom',
+  'entrepriseAdresse',
+  'references',
+  'adresseChantier',
+  'horaireDebut',
+  'horaireFin',
+  'preposeSurveillance',
+  'postes',
+  'journalIds',
+  'jdtStatus',
+  'standbySince',
+  'closedAt',
+  'standbyPeriods',
+  'createdAt',
+  'updatedAt',
+]);
+
+async function getDocPreferServer(ref: ReturnType<typeof doc>) {
+  try {
+    return await getDocFromServer(ref);
+  } catch (err) {
+    if (isOfflineError(err)) {
+      return await getDoc(ref);
+    }
+    throw err;
+  }
+}
+
+function serverChantierNeedsSchemaCleanup(
+  raw: Record<string, unknown>,
+  cId: string
+): boolean {
+  if (Object.keys(raw).some((k) => !ALLOWED_CHANTIER_KEYS.has(k))) return true;
+  if (raw.id !== cId) return true;
+  if (!isValidFirestoreIdValue(raw.ownerId)) return true;
+  if (typeof raw.ownerName !== 'string' || raw.ownerName.length > 120) return true;
+  if (raw.visibility !== 'private') return true;
+  if (!isBoundedStringArray(raw.readerIds, 25)) return true;
+  if (raw.readerEmails !== undefined && !isBoundedStringArray(raw.readerEmails, 3)) return true;
+  if (
+    raw.readerAccessCode !== undefined &&
+    (typeof raw.readerAccessCode !== 'string' ||
+      raw.readerAccessCode.length > 16 ||
+      !/^$|^[0-9]{6}$/.test(raw.readerAccessCode))
+  ) {
+    return true;
+  }
+  if (raw.delegateEmails !== undefined && !isBoundedStringArray(raw.delegateEmails, 3)) return true;
+  if (
+    raw.delegateName !== undefined &&
+    (typeof raw.delegateName !== 'string' || raw.delegateName.length > 150)
+  ) {
+    return true;
+  }
+  if (
+    raw.pseudo !== undefined &&
+    (typeof raw.pseudo !== 'string' || raw.pseudo.length > 80)
+  ) {
+    return true;
+  }
+  if (raw.journalIds !== undefined && !isBoundedStringArray(raw.journalIds, 1000)) return true;
+  if (
+    raw.jdtStatus !== undefined &&
+    raw.jdtStatus !== 'active' &&
+    raw.jdtStatus !== 'standby' &&
+    raw.jdtStatus !== 'archived'
+  ) {
+    return true;
+  }
+  if (
+    raw.standbySince !== undefined &&
+    (typeof raw.standbySince !== 'string' || raw.standbySince.length > 20)
+  ) {
+    return true;
+  }
+  if (
+    raw.closedAt !== undefined &&
+    (typeof raw.closedAt !== 'string' || raw.closedAt.length > 20)
+  ) {
+    return true;
+  }
+  if (
+    raw.standbyPeriods !== undefined &&
+    (!Array.isArray(raw.standbyPeriods) ||
+      raw.standbyPeriods.length > 50 ||
+      (raw.standbyPeriods.length > 0 &&
+        (!raw.standbyPeriods[0] || typeof raw.standbyPeriods[0] !== 'object')))
+  ) {
+    return true;
+  }
+  if (typeof raw.numero !== 'string' || raw.numero.length > 100) return true;
+  if (typeof raw.projet !== 'string' || raw.projet.length > 250) return true;
+  if (typeof raw.entrepriseNom !== 'string' || raw.entrepriseNom.length > 200) return true;
+  if (typeof raw.entrepriseAdresse !== 'string' || raw.entrepriseAdresse.length > 500) return true;
+  if (typeof raw.references !== 'string' || raw.references.length > 150) return true;
+  if (typeof raw.adresseChantier !== 'string' || raw.adresseChantier.length > 500) return true;
+  if (typeof raw.horaireDebut !== 'string' || raw.horaireDebut.length > 20) return true;
+  if (typeof raw.horaireFin !== 'string' || raw.horaireFin.length > 20) return true;
+  if (typeof raw.preposeSurveillance !== 'string' || raw.preposeSurveillance.length > 150) {
+    return true;
+  }
+  if (!isBoundedStringArray(raw.postes, 2000)) return true;
+  if (!isFirestoreTimestamp(raw.createdAt)) return true;
+  if (!isFirestoreTimestamp(raw.updatedAt)) return true;
+  return false;
+}
+
 export async function saveChantierCloud(
   chantier: Chantier,
   user: User
@@ -1294,12 +1422,17 @@ export async function saveChantierCloud(
       : '');
 
   try {
+    const pseudo = clampStr(chantier.pseudo || '', 80);
     const jdtStatus = normalizeChantierJdtStatus(chantier.jdtStatus);
     const standbySince = clampStr(chantier.standbySince || '', 20);
     const closedAt = clampStr(chantier.closedAt || '', 20);
     const standbyPeriods = sanitizeStandbyPeriods(chantier.standbyPeriods);
 
-    if (!chantier.ownerId) {
+    const existingSnap = chantier.ownerId
+      ? await getDocPreferServer(ref).catch(() => null)
+      : null;
+
+    if (!chantier.ownerId || (existingSnap && !existingSnap.exists())) {
       const payload = sanitizeChantierPayload(
         {
           ...chantier,
@@ -1308,6 +1441,7 @@ export async function saveChantierCloud(
           delegateEmails,
           delegateName,
           readerAccessCode,
+          pseudo,
           jdtStatus,
           standbySince,
           closedAt,
@@ -1329,6 +1463,7 @@ export async function saveChantierCloud(
         delegateEmails,
         delegateName,
         readerAccessCode,
+        pseudo,
         jdtStatus,
         standbySince,
         closedAt,
@@ -1340,11 +1475,74 @@ export async function saveChantierCloud(
       return savedNew;
     }
 
+    const serverChData = existingSnap?.exists() ? existingSnap.data() : null;
+    const isOwner =
+      (serverChData?.ownerId || chantier.ownerId) === user.uid;
+
+    if (
+      serverChData &&
+      !existingSnap?.metadata.hasPendingWrites &&
+      isOwner &&
+      serverChantierNeedsSchemaCleanup(serverChData, id)
+    ) {
+      const validCreatedAt = isFirestoreTimestamp(serverChData.createdAt)
+        ? serverChData.createdAt
+        : undefined;
+      const serverReaderIds = Array.isArray(serverChData.readerIds)
+        ? serverChData.readerIds.map(String)
+        : chantier.readerIds || [];
+      const serverJournalIds = Array.isArray(serverChData.journalIds)
+        ? serverChData.journalIds.map(String)
+        : (chantier as Chantier & { journalIds?: string[] }).journalIds || [];
+      const cleanPayload = sanitizeChantierPayload(
+        {
+          ...chantier,
+          id,
+          readerIds: serverReaderIds,
+          readerEmails,
+          delegateEmails,
+          delegateName,
+          readerAccessCode,
+          pseudo,
+          jdtStatus,
+          standbySince,
+          closedAt,
+          standbyPeriods,
+          journalIds: serverJournalIds,
+        } as Chantier,
+        user.uid,
+        ownerName,
+        !validCreatedAt,
+        validCreatedAt
+      );
+      await setDoc(ref, cleanPayload);
+      const savedCleaned: Chantier = {
+        ...chantier,
+        id,
+        ownerId: user.uid,
+        ownerName,
+        visibility: 'private',
+        readerIds: cleanPayload.readerIds,
+        readerEmails,
+        delegateEmails,
+        delegateName,
+        readerAccessCode,
+        pseudo,
+        jdtStatus,
+        standbySince,
+        closedAt,
+        standbyPeriods,
+      };
+      await syncDossierAccessGrant(savedCleaned, user, ownerName, readerAccessCode);
+      return savedCleaned;
+    }
+
     const updateFields: Record<string, unknown> = {
       readerEmails,
       delegateEmails,
       delegateName,
       readerAccessCode,
+      pseudo,
       numero: clampStr(chantier.numero, 100),
       projet: clampStr(chantier.projet, 250),
       entrepriseNom: clampStr(chantier.entrepriseNom, 200),
@@ -1413,6 +1611,7 @@ export async function saveChantierCloud(
         delegateEmails,
         delegateName,
         readerAccessCode,
+        pseudo,
         jdtStatus,
         standbySince,
         closedAt,
@@ -1431,6 +1630,7 @@ export async function saveChantierCloud(
             delegateEmails,
             delegateName,
             readerAccessCode,
+            pseudo,
             jdtStatus,
             standbySince,
             closedAt,
@@ -1452,6 +1652,7 @@ export async function saveChantierCloud(
           delegateEmails,
           delegateName,
           readerAccessCode,
+          pseudo,
           jdtStatus,
           standbySince,
           closedAt,
@@ -1500,6 +1701,9 @@ const ALLOWED_JOURNAL_KEYS = new Set([
   'authorId',
   'authorName',
   'status',
+  'specialType',
+  'periodStart',
+  'periodEnd',
   'journalNum',
   'date',
   'horaireDebut',
@@ -1592,6 +1796,26 @@ function serverJournalNeedsSchemaCleanup(
   ) {
     return true;
   }
+  if (
+    raw.specialType !== undefined &&
+    raw.specialType !== '' &&
+    raw.specialType !== 'standby' &&
+    raw.specialType !== 'jc'
+  ) {
+    return true;
+  }
+  if (
+    raw.periodStart !== undefined &&
+    (typeof raw.periodStart !== 'string' || raw.periodStart.length > 20)
+  ) {
+    return true;
+  }
+  if (
+    raw.periodEnd !== undefined &&
+    (typeof raw.periodEnd !== 'string' || raw.periodEnd.length > 20)
+  ) {
+    return true;
+  }
   if (!isBoundedStringArray(raw.etatAtmo, 20)) return true;
   if (
     !Array.isArray(raw.ouvriers) ||
@@ -1674,7 +1898,7 @@ export async function saveJournalCloud(
   const ref = doc(db, 'chantiers', cId, 'journaux', jId);
 
   try {
-    const snap = await getDoc(ref);
+    const snap = await getDocPreferServer(ref);
     const authorName =
       user.displayName || user.email?.split('@')[0] || 'Utilisateur';
 
@@ -1691,19 +1915,29 @@ export async function saveJournalCloud(
       await updateDoc(doc(db, 'chantiers', cId), {
         journalIds: arrayUnion(jId),
         updatedAt: serverTimestamp(),
-      });
+      }).catch(() => {});
       return;
     }
 
     const serverData = snap.data();
     const isOwner =
-      chantier.ownerId === user.uid || serverData?.chantierOwnerId === user.uid;
+      (serverData?.chantierOwnerId || chantier.ownerId) === user.uid;
     const hasCtrlSig =
       serverData?.signatureControleur != null &&
-      typeof serverData.signatureControleur === 'object';
+      typeof serverData.signatureControleur === 'object' &&
+      typeof (serverData.signatureControleur as Record<string, unknown>).verificationId ===
+        'string' &&
+      String(
+        (serverData.signatureControleur as Record<string, unknown>).verificationId
+      ).length >= 4;
     const hasReaderSig =
       serverData?.signatureLecteur != null &&
-      typeof serverData.signatureLecteur === 'object';
+      typeof serverData.signatureLecteur === 'object' &&
+      typeof (serverData.signatureLecteur as Record<string, unknown>).verificationId ===
+        'string' &&
+      String(
+        (serverData.signatureLecteur as Record<string, unknown>).verificationId
+      ).length >= 4;
 
     if (hasCtrlSig || hasReaderSig) {
       throw new Error(
@@ -1717,7 +1951,11 @@ export async function saveJournalCloud(
       );
     }
 
-    if (isOwner && serverJournalNeedsSchemaCleanup(serverData, cId, jId)) {
+    if (
+      !snap.metadata.hasPendingWrites &&
+      isOwner &&
+      serverJournalNeedsSchemaCleanup(serverData, cId, jId)
+    ) {
       const liveChantier = await resolveLiveChantierReaders(chantier, cId);
       const validCreatedAt = isFirestoreTimestamp(serverData.createdAt)
         ? serverData.createdAt
@@ -1750,9 +1988,16 @@ export async function saveJournalCloud(
 
     const status: JournalStatus =
       journal.status === 'completed' ? 'completed' : 'in_progress';
+    const specialType: 'standby' | 'jc' | '' =
+      journal.specialType === 'standby' || journal.specialType === 'jc'
+        ? journal.specialType
+        : '';
 
     const updatePayload: Record<string, unknown> = {
       status,
+      specialType,
+      periodStart: clampStr(journal.periodStart || '', 20),
+      periodEnd: clampStr(journal.periodEnd || '', 20),
       journalNum: Math.max(1, Math.min(99999, Number(journal.journalNum) || 1)),
       date: clampStr(journal.date, 20),
       horaireDebut: clampStr(journal.horaireDebut, 20),
@@ -1778,6 +2023,10 @@ export async function saveJournalCloud(
       preposeSurveillance: clampStr(journal.preposeSurveillance || '', 150),
       updatedAt: serverTimestamp(),
     };
+
+    if (!snap.metadata.hasPendingWrites && !isFirestoreTimestamp(serverData?.createdAt)) {
+      updatePayload.createdAt = serverTimestamp();
+    }
 
     if (!isOwner && serverData?.authorId !== user.uid) {
       updatePayload.authorId = user.uid;

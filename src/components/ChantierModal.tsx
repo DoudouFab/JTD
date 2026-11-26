@@ -59,6 +59,7 @@ export function ChantierModal({
   onNotify,
 }: ChantierModalProps) {
   const [draftId, setDraftId] = useState<string>('');
+  const [pseudo, setPseudo] = useState('');
   const [numero, setNumero] = useState('');
   const [projet, setProjet] = useState('');
   const [entrepriseNom, setEntrepriseNom] = useState('');
@@ -93,6 +94,7 @@ export function ChantierModal({
 
     const id = editingChantier ? editingChantier.id : uid();
     setDraftId(id);
+    setPseudo(editingChantier?.pseudo || '');
     setNumero(editingChantier?.numero || '');
     setProjet(editingChantier?.projet || '');
     setEntrepriseNom(editingChantier?.entrepriseNom || '');
@@ -274,6 +276,7 @@ export function ChantierModal({
       delegateEmails: cleanedDelegateEmails,
       delegateName: delegateName.trim(),
       readerAccessCode: effectivePin,
+      pseudo: pseudo.trim(),
       numero: numero.trim(),
       projet: projet.trim(),
       entrepriseNom: entrepriseNom.trim(),
@@ -613,6 +616,24 @@ export function ChantierModal({
               placeholder="ex. Égouttage Rue de la Station"
               className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 focus:outline-none focus:border-[#0a5b9c] focus:ring-2 focus:ring-[#0a5b9c]/15"
             />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1.5">
+              Pseudo du chantier (optionnel — titre onglet &amp; carte)
+            </label>
+            <input
+              type="text"
+              lang="fr"
+              maxLength={80}
+              value={pseudo}
+              onChange={(e) => setPseudo(e.target.value)}
+              placeholder="ex. Rue Station (raccourci visuel pour cliquer vite)"
+              className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 bg-white text-sm font-semibold text-slate-900 focus:outline-none focus:border-[#0a5b9c] focus:ring-2 focus:ring-[#0a5b9c]/15"
+            />
+            <p className="text-[11px] text-slate-500 mt-1">
+              Utilisé uniquement comme titre sur les cartes et onglets de l&apos;application (n&apos;apparaît jamais sur les fiches A4 ni dans les PDF).
+            </p>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
