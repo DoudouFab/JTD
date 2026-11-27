@@ -760,7 +760,7 @@ service cloud.firestore {
         && isValidChantier(incoming())
         && incoming().id == chantierId
         && (
-          incoming().ownerId == existing().ownerId
+          (('ownerId' in existing()) && incoming().ownerId == existing().ownerId)
           || (!('ownerId' in existing()) && incoming().ownerId == request.auth.uid)
         )
         && (
@@ -770,7 +770,10 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && (
           (isVerifiedActive()
-            && existing().ownerId == request.auth.uid
+            && (
+              (('ownerId' in existing()) && existing().ownerId == request.auth.uid)
+              || !('ownerId' in existing())
+            )
             && incoming().diff(existing()).addedKeys().hasOnly([
               'id', 'ownerId', 'ownerName', 'visibility',
               'readerIds', 'readerEmails', 'readerAccessCode', 'delegateEmails', 'delegateName',
@@ -788,8 +791,8 @@ service cloud.firestore {
               'createdAt', 'updatedAt'
             ]))
           || (hasActiveShare(chantierId)
-              && incoming().readerIds.hasAll(existing().readerIds)
-              && incoming().readerIds.size() <= existing().readerIds.size() + 1
+              && (!('readerIds' in existing()) || incoming().readerIds.hasAll(existing().readerIds))
+              && (!('readerIds' in existing()) || incoming().readerIds.size() <= existing().readerIds.size() + 1)
               && request.auth.uid in incoming().readerIds
               && incoming().diff(existing()).affectedKeys().hasOnly(['readerIds', 'updatedAt']))
           || (isEmailInDelegateList(existing())
@@ -799,6 +802,7 @@ service cloud.firestore {
 
       allow delete: if isVerifiedActive()
         && isValidId(chantierId)
+        && 'ownerId' in existing()
         && existing().ownerId == request.auth.uid;
 
       match /journaux/{journalId} {
@@ -806,7 +810,9 @@ service cloud.firestore {
           && isValidId(chantierId)
           && isValidId(journalId)
           && (
-            (isVerifiedActive() && get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid)
+            (isVerifiedActive()
+              && 'ownerId' in get(/databases/$(database)/documents/chantiers/$(chantierId)).data
+              && get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid)
             || hasActiveShare(chantierId)
             || isEmailReaderOfChantier(chantierId)
             || isDelegateOfChantier(chantierId)
@@ -836,11 +842,23 @@ service cloud.firestore {
           && incoming().updatedAt == request.time
           && exists(/databases/$(database)/documents/chantiers/$(chantierId))
           && (
-            (isVerifiedActive() && get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid)
+            (isVerifiedActive()
+              && 'ownerId' in get(/databases/$(database)/documents/chantiers/$(chantierId)).data
+              && get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid)
             || isDelegateOfChantier(chantierId)
           )
-          && incoming().chantierOwnerId == get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId
-          && incoming().chantierReaderIds == get(/databases/$(database)/documents/chantiers/$(chantierId)).data.readerIds;
+          && (
+            ('ownerId' in get(/databases/$(database)/documents/chantiers/$(chantierId)).data
+              && incoming().chantierOwnerId == get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId)
+            || (!('ownerId' in get(/databases/$(database)/documents/chantiers/$(chantierId)).data)
+                && incoming().chantierOwnerId == request.auth.uid)
+          )
+          && (
+            ('readerIds' in get(/databases/$(database)/documents/chantiers/$(chantierId)).data
+              && incoming().chantierReaderIds == get(/databases/$(database)/documents/chantiers/$(chantierId)).data.readerIds)
+            || (!('readerIds' in get(/databases/$(database)/documents/chantiers/$(chantierId)).data)
+                && incoming().chantierReaderIds.size() == 0)
+          );
 
         allow update: if isVerifiedUser()
           && isValidId(chantierId)
@@ -849,7 +867,8 @@ service cloud.firestore {
           && incoming().id == journalId
           && incoming().chantierId == chantierId
           && (
-            incoming().chantierOwnerId == get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId
+            ('ownerId' in get(/databases/$(database)/documents/chantiers/$(chantierId)).data
+              && incoming().chantierOwnerId == get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId)
             || (('chantierOwnerId' in existing()) && isValidId(existing().chantierOwnerId) && incoming().chantierOwnerId == existing().chantierOwnerId)
           )
           && (
@@ -857,7 +876,7 @@ service cloud.firestore {
             || !isValidId(existing().authorId)
             || incoming().authorId == existing().authorId
             || (isDelegateOfChantier(chantierId)
-                && existing().status != 'completed'
+                && (!('status' in existing()) || existing().status != 'completed')
                 && (!('signatureControleur' in existing()) || !isSignedRecordPresent(existing().signatureControleur))
                 && (!('signatureLecteur' in existing()) || !isSignedRecordPresent(existing().signatureLecteur))
                 && incoming().authorId == request.auth.uid)
@@ -871,7 +890,8 @@ service cloud.firestore {
             (isVerifiedActive()
               && (
                 (('chantierOwnerId' in existing()) && existing().chantierOwnerId == request.auth.uid)
-                || get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid
+                || ('ownerId' in get(/databases/$(database)/documents/chantiers/$(chantierId)).data
+                    && get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid)
               )
               && (!('signatureControleur' in existing()) || !isSignedRecordPresent(existing().signatureControleur))
               && (!('signatureLecteur' in existing()) || !isSignedRecordPresent(existing().signatureLecteur))
@@ -900,7 +920,8 @@ service cloud.firestore {
             || (isVerifiedActive()
                 && (
                   (('chantierOwnerId' in existing()) && existing().chantierOwnerId == request.auth.uid)
-                  || get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid
+                  || ('ownerId' in get(/databases/$(database)/documents/chantiers/$(chantierId)).data
+                      && get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid)
                 )
                 && (!('signatureControleur' in existing()) || !isSignedRecordPresent(existing().signatureControleur))
                 && incoming().signatureControleur != null
@@ -939,7 +960,7 @@ service cloud.firestore {
                       ]))
                 ))
             || (isDelegateOfChantier(chantierId)
-                && existing().status != 'completed'
+                && (!('status' in existing()) || existing().status != 'completed')
                 && (!('signatureControleur' in existing()) || !isSignedRecordPresent(existing().signatureControleur))
                 && (!('signatureLecteur' in existing()) || !isSignedRecordPresent(existing().signatureLecteur))
                 && (!('signatureControleur' in incoming()) || incoming().signatureControleur == null)
@@ -965,7 +986,9 @@ service cloud.firestore {
                   'updatedAt'
                 ]))
             || (isDelegateOfChantier(chantierId)
+                && 'status' in existing()
                 && existing().status == 'completed'
+                && 'authorId' in existing()
                 && existing().authorId == request.auth.uid
                 && (!('signatureControleur' in existing()) || !isSignedRecordPresent(existing().signatureControleur))
                 && incoming().signatureControleur != null
@@ -985,6 +1008,7 @@ service cloud.firestore {
                       ]))
                 ))
             || ((isEmailReaderOfChantier(chantierId) || hasActiveShare(chantierId))
+                && 'status' in existing()
                 && existing().status == 'completed'
                 && (!('signatureLecteur' in existing()) || !isSignedRecordPresent(existing().signatureLecteur))
                 && incoming().signatureLecteur != null
@@ -993,7 +1017,8 @@ service cloud.firestore {
             || (isVerifiedActive()
                 && (
                   (('chantierOwnerId' in existing()) && existing().chantierOwnerId == request.auth.uid)
-                  || get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid
+                  || ('ownerId' in get(/databases/$(database)/documents/chantiers/$(chantierId)).data
+                      && get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid)
                 )
                 && incoming().diff(existing()).affectedKeys().hasOnly(['chantierReaderIds', 'chantierReaderEmails', 'chantierDelegateEmails', 'updatedAt']))
             || (hasActiveShare(chantierId)
@@ -1006,6 +1031,7 @@ service cloud.firestore {
         allow delete: if isVerifiedActive()
           && isValidId(chantierId)
           && isValidId(journalId)
+          && 'ownerId' in get(/databases/$(database)/documents/chantiers/$(chantierId)).data
           && get(/databases/$(database)/documents/chantiers/$(chantierId)).data.ownerId == request.auth.uid;
       }
     }

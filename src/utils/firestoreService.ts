@@ -249,6 +249,14 @@ export function setCachedJournals(chantierId: string, journals: Journal[]): void
   }
 }
 
+export function removeCachedJournals(chantierId: string): void {
+  try {
+    localStorage.removeItem(`${JOURNALS_CACHE_PREFIX}${chantierId}`);
+  } catch {
+    // ignore
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Colleague Access Control (1 getDocFromServer read at startup for non-admin)
 // ---------------------------------------------------------------------------
@@ -1378,8 +1386,7 @@ function serverChantierNeedsSchemaCleanup(
     raw.standbyPeriods !== undefined &&
     (!Array.isArray(raw.standbyPeriods) ||
       raw.standbyPeriods.length > 50 ||
-      (raw.standbyPeriods.length > 0 &&
-        (!raw.standbyPeriods[0] || typeof raw.standbyPeriods[0] !== 'object')))
+      raw.standbyPeriods.some((item) => !item || typeof item !== 'object'))
   ) {
     return true;
   }
@@ -1428,9 +1435,16 @@ export async function saveChantierCloud(
     const closedAt = clampStr(chantier.closedAt || '', 20);
     const standbyPeriods = sanitizeStandbyPeriods(chantier.standbyPeriods);
 
-    const existingSnap = chantier.ownerId
-      ? await getDocPreferServer(ref).catch(() => null)
-      : null;
+    let existingSnap: Awaited<ReturnType<typeof getDocPreferServer>> | null = null;
+    if (chantier.ownerId) {
+      try {
+        existingSnap = await getDocPreferServer(ref);
+      } catch (snapErr) {
+        if (!isOfflineError(snapErr)) {
+          existingSnap = await getDoc(ref).catch(() => null);
+        }
+      }
+    }
 
     if (!chantier.ownerId || (existingSnap && !existingSnap.exists())) {
       const payload = sanitizeChantierPayload(
@@ -1479,21 +1493,21 @@ export async function saveChantierCloud(
     const isOwner =
       (serverChData?.ownerId || chantier.ownerId) === user.uid;
 
-    if (
-      serverChData &&
-      !existingSnap?.metadata.hasPendingWrites &&
-      isOwner &&
-      serverChantierNeedsSchemaCleanup(serverChData, id)
-    ) {
-      const validCreatedAt = isFirestoreTimestamp(serverChData.createdAt)
-        ? serverChData.createdAt
-        : undefined;
-      const serverReaderIds = Array.isArray(serverChData.readerIds)
-        ? serverChData.readerIds.map(String)
-        : chantier.readerIds || [];
-      const serverJournalIds = Array.isArray(serverChData.journalIds)
-        ? serverChData.journalIds.map(String)
-        : (chantier as Chantier & { journalIds?: string[] }).journalIds || [];
+    const writeFullSanitizedChantier = async (
+      rawServer: Record<string, unknown> | null
+    ): Promise<Chantier> => {
+      const validCreatedAt =
+        rawServer && isFirestoreTimestamp(rawServer.createdAt)
+          ? rawServer.createdAt
+          : undefined;
+      const serverReaderIds =
+        rawServer && Array.isArray(rawServer.readerIds)
+          ? rawServer.readerIds.map(String)
+          : chantier.readerIds || [];
+      const serverJournalIds =
+        rawServer && Array.isArray(rawServer.journalIds)
+          ? rawServer.journalIds.map(String)
+          : (chantier as Chantier & { journalIds?: string[] }).journalIds || [];
       const cleanPayload = sanitizeChantierPayload(
         {
           ...chantier,
@@ -1535,6 +1549,15 @@ export async function saveChantierCloud(
       };
       await syncDossierAccessGrant(savedCleaned, user, ownerName, readerAccessCode);
       return savedCleaned;
+    };
+
+    if (
+      serverChData &&
+      !existingSnap?.metadata.hasPendingWrites &&
+      isOwner &&
+      serverChantierNeedsSchemaCleanup(serverChData, id)
+    ) {
+      return await writeFullSanitizedChantier(serverChData);
     }
 
     const updateFields: Record<string, unknown> = {
@@ -1622,51 +1645,14 @@ export async function saveChantierCloud(
     } catch (updateErr) {
       const code = (updateErr as { code?: string })?.code || '';
       if (code === 'not-found') {
-        const payload = sanitizeChantierPayload(
-          {
-            ...chantier,
-            id,
-            readerEmails,
-            delegateEmails,
-            delegateName,
-            readerAccessCode,
-            pseudo,
-            jdtStatus,
-            standbySince,
-            closedAt,
-            standbyPeriods,
-          },
-          user.uid,
-          ownerName,
-          true
-        );
-        await setDoc(ref, payload);
-        const savedFallback: Chantier = {
-          ...chantier,
-          id,
-          ownerId: user.uid,
-          ownerName,
-          visibility: 'private',
-          readerIds: payload.readerIds,
-          readerEmails,
-          delegateEmails,
-          delegateName,
-          readerAccessCode,
-          pseudo,
-          jdtStatus,
-          standbySince,
-          closedAt,
-          standbyPeriods,
-        };
-        if (readerAccessCode) {
-          await syncDossierAccessGrant(
-            savedFallback,
-            user,
-            ownerName,
-            readerAccessCode
-          );
+        return await writeFullSanitizedChantier(null);
+      }
+      if (code === 'permission-denied' && isOwner) {
+        const liveSnap = await getDocFromServer(ref).catch(() => null);
+        const liveData = liveSnap?.exists() ? liveSnap.data() : serverChData;
+        if (!liveData || !liveData.ownerId || liveData.ownerId === user.uid) {
+          return await writeFullSanitizedChantier(liveData || null);
         }
-        return savedFallback;
       }
       throw updateErr;
     }
@@ -1675,16 +1661,95 @@ export async function saveChantierCloud(
   }
 }
 
-export async function deleteChantierCloud(chantierId: string): Promise<void> {
+export async function deleteChantierCloud(
+  chantierId: string,
+  ownerId?: string
+): Promise<void> {
   const id = sanitizeDocId(chantierId);
+  const uidToUse = ownerId || auth.currentUser?.uid || '';
   try {
-    const jSnap = await getDocs(collection(db, 'chantiers', id, 'journaux'));
+    if (!uidToUse) {
+      throw new Error('Utilisateur non authentifié.');
+    }
+
+    const parentRef = doc(db, 'chantiers', id);
+    const parentSnap = await getDocPreferServer(parentRef).catch(() => null);
+    const knownJournalIds = Array.isArray(parentSnap?.data()?.journalIds)
+      ? (parentSnap!.data()!.journalIds as unknown[]).map(String)
+      : [];
+
+    const jQuery = query(
+      collection(db, 'chantiers', id, 'journaux'),
+      where('chantierOwnerId', '==', uidToUse)
+    );
+    let jSnap;
+    try {
+      jSnap = await getDocsFromServer(jQuery);
+    } catch (err) {
+      if (isOfflineError(err)) {
+        jSnap = await getDocs(jQuery);
+      } else {
+        throw err;
+      }
+    }
+
+    const deletedIds = new Set<string>();
     for (let i = 0; i < jSnap.docs.length; i += 400) {
       const batch = writeBatch(db);
-      jSnap.docs.slice(i, i + 400).forEach((d) => batch.delete(d.ref));
+      jSnap.docs.slice(i, i + 400).forEach((d) => {
+        deletedIds.add(d.id);
+        batch.delete(d.ref);
+      });
       await batch.commit();
     }
-    await deleteDoc(doc(db, 'chantiers', id));
+
+    const extraIds = knownJournalIds.filter((jId) => jId && !deletedIds.has(jId));
+    for (let i = 0; i < extraIds.length; i += 400) {
+      const batch = writeBatch(db);
+      extraIds.slice(i, i + 400).forEach((jId) => {
+        batch.delete(doc(db, 'chantiers', id, 'journaux', sanitizeDocId(jId)));
+      });
+      await batch.commit().catch(() => {});
+    }
+
+    // Best-effort cleanup of share invites, active shares, and dossier grants
+    await Promise.all([
+      getDocs(query(collection(db, 'dossier_access'), where('ownerId', '==', uidToUse)))
+        .then(async (snap) => {
+          const targets = snap.docs.filter((d) => d.data().chantierId === id);
+          for (let i = 0; i < targets.length; i += 400) {
+            const batch = writeBatch(db);
+            targets.slice(i, i + 400).forEach((d) => batch.delete(d.ref));
+            await batch.commit();
+          }
+        })
+        .catch(() => {}),
+      getDocs(query(collection(db, 'shareInvites'), where('ownerId', '==', uidToUse)))
+        .then(async (snap) => {
+          const targets = snap.docs.filter((d) => d.data().chantierId === id);
+          for (let i = 0; i < targets.length; i += 400) {
+            const batch = writeBatch(db);
+            targets.slice(i, i + 400).forEach((d) => batch.delete(d.ref));
+            await batch.commit();
+          }
+        })
+        .catch(() => {}),
+      getDocs(
+        query(collection(db, 'chantierShares'), where('chantierOwnerId', '==', uidToUse))
+      )
+        .then(async (snap) => {
+          const targets = snap.docs.filter((d) => d.data().chantierId === id);
+          for (let i = 0; i < targets.length; i += 400) {
+            const batch = writeBatch(db);
+            targets.slice(i, i + 400).forEach((d) => batch.delete(d.ref));
+            await batch.commit();
+          }
+        })
+        .catch(() => {}),
+    ]);
+
+    await deleteDoc(parentRef);
+    removeCachedJournals(id);
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `chantiers/${id}`);
   }
@@ -1742,7 +1807,7 @@ function isBoundedStringArray(val: unknown, maxItems: number): boolean {
   return (
     Array.isArray(val) &&
     val.length <= maxItems &&
-    (val.length === 0 || typeof val[0] === 'string')
+    val.every((item) => typeof item === 'string')
   );
 }
 
@@ -1760,7 +1825,23 @@ function hasValidSignatureShape(
     isValidFirestoreIdValue(rec.signerUid) &&
     typeof rec.signerName === 'string' &&
     rec.signerName.length >= 1 &&
-    rec.signerName.length <= 120
+    rec.signerName.length <= 120 &&
+    typeof rec.verificationId === 'string' &&
+    rec.verificationId.length >= 4 &&
+    rec.verificationId.length <= 80 &&
+    typeof rec.verifiedAt === 'string' &&
+    rec.verifiedAt.length >= 10 &&
+    rec.verifiedAt.length <= 40 &&
+    typeof rec.signedAt === 'string' &&
+    rec.signedAt.length >= 10 &&
+    rec.signedAt.length <= 40 &&
+    typeof rec.documentSha256 === 'string' &&
+    rec.documentSha256.length >= 32 &&
+    rec.documentSha256.length <= 128 &&
+    typeof rec.cryptoDigest === 'string' &&
+    rec.cryptoDigest.length >= 16 &&
+    rec.cryptoDigest.length <= 512 &&
+    typeof rec.webAuthnUsed === 'boolean'
   );
 }
 
@@ -1820,8 +1901,7 @@ function serverJournalNeedsSchemaCleanup(
   if (
     !Array.isArray(raw.ouvriers) ||
     raw.ouvriers.length > 100 ||
-    (raw.ouvriers.length > 0 &&
-      (!raw.ouvriers[0] || typeof raw.ouvriers[0] !== 'object'))
+    raw.ouvriers.some((o) => !o || typeof o !== 'object')
   ) {
     return true;
   }
@@ -1951,21 +2031,19 @@ export async function saveJournalCloud(
       );
     }
 
-    if (
-      !snap.metadata.hasPendingWrites &&
-      isOwner &&
-      serverJournalNeedsSchemaCleanup(serverData, cId, jId)
-    ) {
+    const writeFullSanitizedJournal = async (
+      rawServer: Record<string, unknown>
+    ): Promise<void> => {
       const liveChantier = await resolveLiveChantierReaders(chantier, cId);
-      const validCreatedAt = isFirestoreTimestamp(serverData.createdAt)
-        ? serverData.createdAt
+      const validCreatedAt = isFirestoreTimestamp(rawServer.createdAt)
+        ? rawServer.createdAt
         : undefined;
-      const validAuthorId = isValidFirestoreIdValue(serverData.authorId)
-        ? serverData.authorId
+      const validAuthorId = isValidFirestoreIdValue(rawServer.authorId)
+        ? rawServer.authorId
         : user.uid;
       const resolvedAuthorName =
-        typeof serverData.authorName === 'string' && serverData.authorName.trim()
-          ? serverData.authorName.slice(0, 120)
+        typeof rawServer.authorName === 'string' && rawServer.authorName.trim()
+          ? rawServer.authorName.slice(0, 120)
           : authorName;
 
       const cleanPayload = sanitizeJournalPayload(
@@ -1983,6 +2061,14 @@ export async function saveJournalCloud(
         validCreatedAt
       );
       await setDoc(ref, cleanPayload);
+    };
+
+    if (
+      !snap.metadata.hasPendingWrites &&
+      isOwner &&
+      serverJournalNeedsSchemaCleanup(serverData, cId, jId)
+    ) {
+      await writeFullSanitizedJournal(serverData);
       return;
     }
 
@@ -2033,7 +2119,42 @@ export async function saveJournalCloud(
       updatePayload.authorName = clampStr(authorName, 120);
     }
 
-    await updateDoc(ref, updatePayload);
+    try {
+      await updateDoc(ref, updatePayload);
+    } catch (updateErr) {
+      const code = (updateErr as { code?: string })?.code || '';
+      if (code === 'permission-denied' && isOwner) {
+        const liveSnap = await getDocFromServer(ref).catch(() => null);
+        if (liveSnap && !liveSnap.exists()) {
+          const liveChantier = await resolveLiveChantierReaders(chantier, cId);
+          const payload = sanitizeJournalPayload(
+            { ...journal, id: jId, chantierId: cId },
+            liveChantier,
+            user.uid,
+            authorName,
+            true
+          );
+          await setDoc(ref, payload);
+          return;
+        }
+        const freshData = liveSnap?.exists() ? liveSnap.data() : serverData;
+        const freshCtrlVerif = (
+          freshData?.signatureControleur as Record<string, unknown> | null | undefined
+        )?.verificationId;
+        const freshReaderVerif = (
+          freshData?.signatureLecteur as Record<string, unknown> | null | undefined
+        )?.verificationId;
+        const hasRealCtrl =
+          typeof freshCtrlVerif === 'string' && freshCtrlVerif.length >= 4;
+        const hasRealReader =
+          typeof freshReaderVerif === 'string' && freshReaderVerif.length >= 4;
+        if (!hasRealCtrl && !hasRealReader && freshData) {
+          await writeFullSanitizedJournal(freshData);
+          return;
+        }
+      }
+      throw updateErr;
+    }
   } catch (error) {
     if (
       error instanceof Error &&

@@ -114,7 +114,20 @@ export function StandbyResumeModal({
       low.includes('missing or insufficient permissions') ||
       low.includes('permission-denied')
     ) {
-      return `${fallback} (Accès Firestore refusé — vérifiez votre connexion ou actualisez la page.)`;
+      let diag = '';
+      if (raw.startsWith('{')) {
+        try {
+          const parsed = JSON.parse(raw) as {
+            operationType?: string;
+            path?: string | null;
+          };
+          const parts = [parsed.operationType, parsed.path].filter(Boolean);
+          if (parts.length > 0) diag = ` [${parts.join(' · ')}]`;
+        } catch {
+          // ignore invalid JSON
+        }
+      }
+      return `${fallback} (Accès Firestore refusé — vérifiez votre connexion ou actualisez la page.${diag})`;
     }
     if (low.includes('offline') || low.includes('unavailable')) {
       return `${fallback} (Connexion Internet instable ou serveur indisponible.)`;

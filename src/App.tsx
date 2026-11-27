@@ -57,6 +57,7 @@ import {
   getCachedJournals,
   importLocalDbToCloud,
   redeemShareInvite,
+  removeCachedJournals,
   saveChantierCloud,
   saveJournalCloud,
   setCachedChantiersBundle,
@@ -109,6 +110,22 @@ function canAuthorOnChantier(
   return ch.ownerId === u.uid || isUserDelegateOnChantier(ch, u.email);
 }
 
+function extractFirestoreDiagTag(rawMessage: string): string {
+  if (!rawMessage.startsWith('{')) return '';
+  try {
+    const parsed = JSON.parse(rawMessage) as {
+      operationType?: string;
+      path?: string | null;
+    };
+    const op = parsed.operationType ? String(parsed.operationType) : '';
+    const path = parsed.path ? String(parsed.path) : '';
+    if (!op && !path) return '';
+    return ` [${[op, path].filter(Boolean).join(' · ')}]`;
+  } catch {
+    return '';
+  }
+}
+
 function formatActionError(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) {
     const low = err.message.toLowerCase();
@@ -123,7 +140,8 @@ function formatActionError(err: unknown, fallback: string): string {
       low.includes('permission-denied') ||
       low.includes('missing or insufficient permissions')
     ) {
-      return `${fallback} (Accès Firestore refusé — vérifiez votre connexion ou les règles de sécurité.)`;
+      const diag = extractFirestoreDiagTag(err.message);
+      return `${fallback} (Accès Firestore refusé — vérifiez votre connexion ou actualisez la page.${diag})`;
     }
     if (low.includes('offline') || low.includes('unavailable')) {
       return `${fallback} (Appareil hors-ligne ou serveur momentanément indisponible.)`;
@@ -961,7 +979,7 @@ export default function App() {
   };
 
   const handleDeleteChantier = (ch: Chantier) => {
-    if (!user) return;
+    if (!user || ch.ownerId !== user.uid) return;
     setConfirmState({
       title: 'Supprimer le chantier ?',
       message: `Supprimer « ${ch.numero || ''} ${ch.projet || ''} » ainsi que tous ses journaux ? Cette action est irréversible.`,
@@ -970,7 +988,8 @@ export default function App() {
       onConfirm: async () => {
         setConfirmState(null);
         try {
-          await deleteChantierCloud(ch.id);
+          await deleteChantierCloud(ch.id, user.uid);
+          removeCachedJournals(ch.id);
           setChantiers((prev) => {
             const next = prev.filter((item) => item.id !== ch.id);
             setCachedChantiersBundle(user.uid, {
@@ -979,12 +998,20 @@ export default function App() {
             });
             return next;
           });
+          setJournalsByChantierId((prev) => {
+            if (!(ch.id in prev)) return prev;
+            const next = { ...prev };
+            delete next[ch.id];
+            return next;
+          });
           if (currentChantierId === ch.id) {
+            setChantierJournals([]);
+            setEditingJournalDraft(null);
             setCurrentChantierId(null);
             setCurrentJournalId(null);
             setView('chantiers');
           }
-          notify('Chantier supprimé.');
+          notify('Chantier supprimé.', 'success');
         } catch (err) {
           notify(
             formatActionError(err, 'Erreur lors de la suppression du chantier.'),
@@ -1999,7 +2026,7 @@ export default function App() {
       if (replaceAll) {
         for (const ch of chantiers) {
           if (ch.ownerId === user.uid) {
-            await deleteChantierCloud(ch.id);
+            await deleteChantierCloud(ch.id, user.uid);
           }
         }
       }
